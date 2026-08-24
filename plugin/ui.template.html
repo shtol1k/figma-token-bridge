@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<!-- INLINE_CSS -->
+</head>
+<body class="m-0 p-3 font-sans text-xs text-neutral-900 bg-white">
+  <h3 class="text-sm font-semibold mb-2">Figma Token Bridge</h3>
+
+  <div class="flex items-center justify-between gap-2 pb-2.5 mb-2 border-b border-neutral-200">
+    <div>
+      <div class="font-semibold text-xs">Tokens folder (this file)</div>
+      <div class="text-neutral-500 text-[11px] max-w-[220px] truncate" id="folder-display">(not set)</div>
+    </div>
+    <button
+      class="text-[11px] px-2.5 py-1.5 rounded-md bg-neutral-900 text-white hover:bg-neutral-700 cursor-pointer shrink-0"
+      data-action="choose-file-folder"
+    >Folder…</button>
+  </div>
+
+  <div id="collections"></div>
+
+  <div
+    id="log"
+    class="mt-3 text-[11px] text-neutral-700 whitespace-pre-wrap bg-neutral-50 p-2 rounded-md min-h-8"
+  >Loading collections…</div>
+
+  <script>
+    const BRIDGE = "http://localhost:8934";
+    const state = { collections: [], folder: null, importOpenFor: null, importFiles: [] };
+
+    const BTN = "text-[11px] px-2 py-1 rounded-md border border-neutral-300 bg-white hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer";
+    const BTN_PRIMARY = "text-[11px] px-2 py-1 rounded-md bg-neutral-900 text-white hover:bg-neutral-700 cursor-pointer";
+
+    const ICONS = {
+      success:
+        '<svg width="12" height="12" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
+        '<circle cx="12" cy="12" r="10" fill="#16a34a"/>' +
+        '<path d="M8 12.5l2.5 2.5L16 9.5" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>' +
+        "</svg>",
+      error:
+        '<svg width="12" height="12" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
+        '<circle cx="12" cy="12" r="10" fill="#dc2626"/>' +
+        '<path d="M9 9l6 6M15 9l-6 6" stroke="white" stroke-width="2.2" stroke-linecap="round" fill="none"/>' +
+        "</svg>",
+      info:
+        '<svg width="12" height="12" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
+        '<circle cx="12" cy="12" r="10" fill="#a3a3a3"/>' +
+        '<circle cx="12" cy="8" r="1.2" fill="white"/>' +
+        '<path d="M12 11v5" stroke="white" stroke-width="2.2" stroke-linecap="round"/>' +
+        "</svg>",
+    };
+    const TITLE_COLOR = { success: "text-green-600", error: "text-red-600", info: "text-neutral-700" };
+
+    function escapeHtml(s) {
+      return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    function log(title, detail, kind) {
+      kind = kind || "info";
+      const icon = ICONS[kind];
+      const detailHtml = detail
+        ? '<span class="text-neutral-600"> ' + escapeHtml(detail) + "</span>"
+        : "";
+      document.getElementById("log").innerHTML =
+        '<div class="flex items-start gap-1.5">' +
+          '<span class="mt-0.5 shrink-0">' + icon + "</span>" +
+          '<span><span class="font-semibold ' + TITLE_COLOR[kind] + '">' + escapeHtml(title) + "</span>" +
+            detailHtml +
+          "</span>" +
+        "</div>";
+    }
+
+    function slug(name) {
+      return name.toLowerCase();
+    }
+
+    function render() {
+      document.getElementById("folder-display").textContent = state.folder || "(not set)";
+
+      const container = document.getElementById("collections");
+      container.innerHTML = "";
+      if (state.collections.length === 0) {
+        container.textContent = "No local variable collections found in this file.";
+        return;
+      }
+      const hasFolder = Boolean(state.folder);
+      for (const c of state.collections) {
+        const wrap = document.createElement("div");
+        wrap.className = "border-b border-neutral-100 py-2";
+
+        let panelHtml = "";
+        if (state.importOpenFor === c.name) {
+          if (state.importFiles.length === 0) {
+            panelHtml =
+              '<div class="mt-2 p-2 bg-neutral-50 rounded-md text-[11px] text-neutral-500">No *.tokens.json files found in ' +
+              state.folder + "/" + slug(c.name) + "</div>";
+          } else {
+            const items = state.importFiles
+              .map(
+                (f) =>
+                  '<label class="block text-[11px] py-0.5"><input type="checkbox" value="' + f +
+                  '" checked class="mr-1.5 align-middle"> ' + f + "</label>",
+              )
+              .join("");
+            panelHtml =
+              '<div class="mt-2 p-2 bg-neutral-50 rounded-md" data-collection="' + c.name + '">' +
+              items +
+              '<button class="' + BTN_PRIMARY + ' mt-1.5" data-action="import-selected" data-id="' +
+              c.id + '" data-name="' + c.name + '">Import selected</button>' +
+              "</div>";
+          }
+        }
+
+        wrap.innerHTML =
+          '<div class="flex items-center justify-between gap-2">' +
+            '<div class="font-semibold">' + c.name + '</div>' +
+            '<div class="flex gap-1.5 shrink-0">' +
+              '<button class="' + BTN + '" data-action="export" data-id="' + c.id + '" data-name="' +
+                c.name + '"' + (hasFolder ? '' : ' disabled') + '>Export</button>' +
+              '<button class="' + BTN + '" data-action="toggle-import" data-id="' + c.id + '" data-name="' +
+                c.name + '"' + (hasFolder ? '' : ' disabled') + '>Import</button>' +
+            '</div>' +
+          '</div>' +
+          panelHtml;
+        container.appendChild(wrap);
+      }
+    }
+
+    async function openImportPanel(collectionName) {
+      state.importOpenFor = collectionName;
+      state.importFiles = [];
+      render();
+      try {
+        const listDir = state.folder + "/" + slug(collectionName);
+        const res = await fetch(BRIDGE + "/list-files?dir=" + encodeURIComponent(listDir));
+        const data = await res.json();
+        state.importFiles = data.files || [];
+      } catch (err) {
+        log("List files failed", err.message, "error");
+      }
+      render();
+    }
+
+    document.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button");
+      if (!btn) return;
+      const action = btn.dataset.action;
+
+      if (action === "choose-file-folder") {
+        log("Opening folder picker…", "", "info");
+        try {
+          const res = await fetch(BRIDGE + "/choose-folder", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt: "Select tokens folder for this Figma file" }),
+          });
+          const data = await res.json();
+          if (!data.path) {
+            log("Cancelled", "", "info");
+            return;
+          }
+          parent.postMessage({ pluginMessage: { type: "save-folder", folderPath: data.path } }, "*");
+          log("Saved folder", data.path, "success");
+        } catch (err) {
+          log("Bridge server error", err.message + ". Is it running (npm run start)?", "error");
+        }
+        return;
+      }
+
+      if (action === "export") {
+        const id = btn.dataset.id;
+        const name = btn.dataset.name;
+        log("Exporting", name, "info");
+        parent.postMessage({ pluginMessage: { type: "export", collectionId: id, dir: state.folder } }, "*");
+        return;
+      }
+
+      if (action === "toggle-import") {
+        const name = btn.dataset.name;
+        if (state.importOpenFor === name) {
+          state.importOpenFor = null;
+          render();
+          return;
+        }
+        log("Listing files", name, "info");
+        await openImportPanel(name);
+        return;
+      }
+
+      if (action === "import-selected") {
+        const id = btn.dataset.id;
+        const name = btn.dataset.name;
+        const panel = btn.closest("[data-collection]");
+        const checked = Array.from(panel.querySelectorAll('input[type="checkbox"]:checked')).map(
+          (cb) => cb.value,
+        );
+        if (checked.length === 0) {
+          log("Select a file", "at least one file is required to import", "info");
+          return;
+        }
+        log("Reading files", checked.length + " file(s) for " + name, "info");
+        try {
+          const listDir = state.folder + "/" + slug(name);
+          const res = await fetch(BRIDGE + "/read-files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ dir: listDir, files: checked }),
+          });
+          const data = await res.json();
+          const files = checked.map((filename) => ({ filename, content: data[filename] }));
+          log("Importing", name, "info");
+          parent.postMessage({ pluginMessage: { type: "import", collectionId: id, files: files } }, "*");
+        } catch (err) {
+          log("Read files failed", err.message, "error");
+        }
+        return;
+      }
+    });
+
+    window.onmessage = async (event) => {
+      const msg = event.data.pluginMessage;
+      if (!msg) return;
+
+      if (msg.type === "collections") {
+        state.collections = msg.collections;
+        state.folder = msg.folder;
+        render();
+        log("Ready", "", "info");
+      }
+
+      if (msg.type === "do-export") {
+        try {
+          const res = await fetch(BRIDGE + "/export", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ dir: msg.dir, files: msg.files }),
+          });
+          const data = await res.json();
+          log("Exported", data.written.join(", "), "success");
+        } catch (err) {
+          log("Export failed", err.message, "error");
+        }
+      }
+
+      if (msg.type === "import-result") {
+        const s = msg.summary;
+        let detail =
+          "updated: " + s.updated + ", renamed: " + s.renamed +
+          ", created: " + s.created + ", stale-ID fallback: " + s.staleId;
+        if (s.notes && s.notes.length > 0) {
+          detail += "\n" + s.notes.join("\n");
+        }
+        log("Import done", detail, "success");
+        state.importOpenFor = null;
+        render();
+      }
+    };
+
+    parent.postMessage({ pluginMessage: { type: "get-collections" } }, "*");
+  </script>
+</body>
+</html>
