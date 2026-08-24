@@ -220,21 +220,22 @@ function flattenTokens(
   return out;
 }
 
-async function findVariableByName(collectionId: string, name: string): Promise<Variable | null> {
-  const all = await figma.variables.getLocalVariablesAsync();
-  return all.find((v) => v.variableCollectionId === collectionId && v.name === name) ?? null;
-}
-
-async function findAnyVariableByName(name: string): Promise<Variable | null> {
-  const all = await figma.variables.getLocalVariablesAsync();
-  return all.find((v) => v.name === name) ?? null;
-}
-
 /**
  * Match key: com.figma.variableId first (survives rename/move — the whole
  * point of carrying it), falling back to name matching only when the ID is
  * missing (brand-new, code-authored token) or stale (target deleted in
  * Figma since the last export).
+ *
+ * IMPORTANT: `getVariableByIdAsync` has been observed to still resolve a
+ * variable ID for a short window after the variable was deleted in the
+ * Figma UI (a tombstoned record no longer visible or enumerable, but still
+ * directly fetchable by ID) — it does not reliably return `null` the way
+ * its documentation implies. `getLocalVariablesAsync()` is the source that
+ * correctly excludes deleted variables, so every ID lookup here is
+ * cross-checked against that enumerable list before being trusted. Relying
+ * on `getVariableByIdAsync` alone silently no-ops `setValueForMode` on a
+ * tombstoned object — no error, no visible effect in Figma, and the token
+ * gets counted as "updated" instead of "created".
  */
 async function importFile(
   collection: VariableCollection,
@@ -243,6 +244,16 @@ async function importFile(
   summary: ImportSummary,
 ): Promise<void> {
   const tokens = flattenTokens(content);
+  const allLocalVars = await figma.variables.getLocalVariablesAsync();
+  const liveIds = new Set(allLocalVars.map((v) => v.id));
+  const collectionVars = allLocalVars.filter((v) => v.variableCollectionId === collection.id);
+
+  function findByName(name: string): Variable | null {
+    return collectionVars.find((v) => v.name === name) ?? null;
+  }
+  function findAnyByName(name: string): Variable | null {
+    return allLocalVars.find((v) => v.name === name) ?? null;
+  }
 
   for (const { path: tokenPath, node } of tokens) {
     const name = tokenPath.join("/");
@@ -251,19 +262,36 @@ async function importFile(
 
     let variable: Variable | null = null;
 
-    if (variableId) {
+    if (variableId && liveIds.has(variableId)) {
       variable = await figma.variables.getVariableByIdAsync(variableId);
-      if (!variable) {
-        variable = await findVariableByName(collection.id, name);
-        if (variable) summary.staleId++;
+    }
+
+    if (!variable) {
+      if (variableId) {
+        summary.staleId++;
       }
-    } else {
-      variable = await findVariableByName(collection.id, name);
+      const byName = findByName(name);
+      if (byName) {
+        variable = byName;
+        if (variableId) {
+          summary.notes.push(
+            `"${name}": stale/removed ID ${variableId} — matched an existing variable by name instead (${byName.id}).`,
+          );
+        }
+      } else if (variableId) {
+        summary.notes.push(
+          `"${name}": stale/removed ID ${variableId}, no name match either — creating new.`,
+        );
+      }
     }
 
     if (!variable) {
       variable = figma.variables.createVariable(name, collection, typeToResolvedType(node.$type));
+      collectionVars.push(variable);
+      allLocalVars.push(variable);
+      liveIds.add(variable.id);
       summary.created++;
+      summary.notes.push(`"${name}": created new variable ${variable.id}.`);
     } else if (variable.name !== name) {
       variable.name = name;
       summary.renamed++;
@@ -273,11 +301,12 @@ async function importFile(
 
     const aliasData = extensions["com.figma.aliasData"];
     if (aliasData) {
-      let target = aliasData.targetVariableId
-        ? await figma.variables.getVariableByIdAsync(aliasData.targetVariableId)
-        : null;
+      let target =
+        aliasData.targetVariableId && liveIds.has(aliasData.targetVariableId)
+          ? await figma.variables.getVariableByIdAsync(aliasData.targetVariableId)
+          : null;
       if (!target && aliasData.targetVariableName) {
-        target = await findAnyVariableByName(aliasData.targetVariableName);
+        target = findAnyByName(aliasData.targetVariableName);
       }
       if (target) {
         variable.setValueForMode(modeId, { type: "VARIABLE_ALIAS", id: target.id });

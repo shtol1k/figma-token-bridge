@@ -155,6 +155,21 @@ a fallback, in that order:
    one already exists with that exact name; otherwise a brand-new
    variable is created via `figma.variables.createVariable`.
 
+**A resolved ID is not proof the variable still exists.** In practice,
+`getVariableByIdAsync` has been observed to still resolve a variable ID
+for some window after that variable was deleted in the Figma UI — a
+tombstoned record no longer visible in the panel and no longer present in
+`getLocalVariablesAsync()`'s enumeration, but still directly fetchable by
+ID. Its documentation says it returns `null` when a variable "is not
+found"; that did not hold in this case. Trusting the resolved object
+meant `setValueForMode` silently no-op'd on a tombstone — no error, no
+visible change in Figma, and the token got counted as `updated` instead
+of `created`, so a deliberately re-added token never actually came back.
+The fix: every ID lookup (both the main token and alias targets) is
+cross-checked against a `getLocalVariablesAsync()` snapshot taken at the
+start of `importFile` before being trusted; an ID outside that set is
+treated exactly like a lookup that returned `null`.
+
 Alias tokens (`com.figma.aliasData`) are resolved the same way on Import
 — by `targetVariableId` first, `targetVariableName` second — and written
 back as `{type:"VARIABLE_ALIAS", id}`, not as a plain value.
