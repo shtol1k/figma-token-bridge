@@ -148,8 +148,9 @@ a fallback, in that order:
    Import creating an orphan new variable next to the old one.
 2. **ID present, doesn't resolve** (variable was deleted in Figma since
    the last Export) → falls back to matching by name within the same
-   collection, and is counted separately (`staleId`) so this is visible
-   in the plugin's summary rather than silently treated as normal.
+   collection, and is counted separately (`deleted` in the summary, the
+   user-facing label for what's internally a stale-ID fallback) so this
+   is visible rather than silently treated as normal.
 3. **ID absent entirely** → this is a token that was authored directly in
    the JSON with no prior Figma variable behind it. Matched by name if
    one already exists with that exact name; otherwise a brand-new

@@ -50,7 +50,7 @@
 
   <div id="file-status" class="text-[11px] text-neutral-500 mb-1"></div>
 
-  <div id="log" class="text-[11px] text-neutral-700 whitespace-pre-wrap"></div>
+  <div id="log" class="text-[11px] text-neutral-700 whitespace-pre-wrap bg-neutral-50 rounded-md p-2"></div>
 
   <svg
     id="resize-handle"
@@ -277,8 +277,14 @@
       if (msg.type === "import-result") {
         const s = msg.summary;
         let detail =
-          "updated: " + s.updated + ", renamed: " + s.renamed +
-          ", created: " + s.created + ", stale-ID fallback: " + s.staleId;
+          "Created: " + s.created + "\n" +
+          "Deleted: " + s.deleted + "\n" +
+          "Updated: " + s.updated + "\n" +
+          "- Name: " + s.nameChanges + "\n" +
+          "- Value: " + s.valueChanges + "\n" +
+          "- Scope: " + s.scopeChanges + "\n" +
+          "- Description: " + s.descriptionChanges + "\n" +
+          "- Code Syntax: " + s.codeSyntaxChanges;
         if (s.notes && s.notes.length > 0) {
           detail += "\n" + s.notes.join("\n");
         }

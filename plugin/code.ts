@@ -178,11 +178,34 @@ async function serializeCollectionMode(
 }
 
 interface ImportSummary {
-  updated: number;
-  renamed: number;
   created: number;
-  staleId: number;
+  deleted: number;
+  updated: number;
+  nameChanges: number;
+  valueChanges: number;
+  scopeChanges: number;
+  descriptionChanges: number;
+  codeSyntaxChanges: number;
   notes: string[];
+}
+
+function valuesEqual(a: VariableValue, b: VariableValue): boolean {
+  const aliasA = isAlias(a);
+  const aliasB = isAlias(b);
+  if (aliasA || aliasB) {
+    return aliasA && aliasB && a.id === b.id;
+  }
+  if (typeof a === "object" && a !== null && typeof b === "object" && b !== null) {
+    const ca = a as RGBA;
+    const cb = b as RGBA;
+    return (
+      Math.abs(ca.r - cb.r) < 1e-6 &&
+      Math.abs(ca.g - cb.g) < 1e-6 &&
+      Math.abs(ca.b - cb.b) < 1e-6 &&
+      Math.abs(ca.a - cb.a) < 1e-6
+    );
+  }
+  return a === b;
 }
 
 function typeToResolvedType(dtcgType: string): VariableResolvedDataType {
@@ -268,7 +291,7 @@ async function importFile(
 
     if (!variable) {
       if (variableId) {
-        summary.staleId++;
+        summary.deleted++;
       }
       const byName = findByName(name);
       if (byName) {
@@ -285,21 +308,25 @@ async function importFile(
       }
     }
 
+    let isNew = false;
     if (!variable) {
+      isNew = true;
       variable = figma.variables.createVariable(name, collection, typeToResolvedType(node.$type));
       collectionVars.push(variable);
       allLocalVars.push(variable);
       liveIds.add(variable.id);
       summary.created++;
       summary.notes.push(`"${name}": created new variable ${variable.id}.`);
-    } else if (variable.name !== name) {
-      variable.name = name;
-      summary.renamed++;
     } else {
       summary.updated++;
+      if (variable.name !== name) {
+        variable.name = name;
+        summary.nameChanges++;
+      }
     }
 
     const aliasData = extensions["com.figma.aliasData"];
+    let desiredValue: VariableValue | null = null;
     if (aliasData) {
       let target =
         aliasData.targetVariableId && liveIds.has(aliasData.targetVariableId)
@@ -309,19 +336,28 @@ async function importFile(
         target = findAnyByName(aliasData.targetVariableName);
       }
       if (target) {
-        variable.setValueForMode(modeId, { type: "VARIABLE_ALIAS", id: target.id });
+        desiredValue = { type: "VARIABLE_ALIAS", id: target.id };
       } else {
         summary.notes.push(
           `Alias target not found for "${name}" (wanted "${aliasData.targetVariableName}") — value left unset.`,
         );
       }
     } else {
-      variable.setValueForMode(modeId, toFigmaValue(node.$type, node.$value));
+      desiredValue = toFigmaValue(node.$type, node.$value);
+    }
+    if (desiredValue !== null) {
+      const currentValue = variable.valuesByMode[modeId];
+      const unchanged = !isNew && currentValue !== undefined && valuesEqual(currentValue, desiredValue);
+      if (!unchanged) {
+        variable.setValueForMode(modeId, desiredValue);
+        if (!isNew) summary.valueChanges++;
+      }
     }
 
     const desiredDescription = node.$description ?? "";
     if (variable.description !== desiredDescription) {
       variable.description = desiredDescription;
+      if (!isNew) summary.descriptionChanges++;
     }
 
     const scopes = extensions["com.figma.scopes"];
@@ -331,16 +367,20 @@ async function importFile(
         current.length !== scopes.length || scopes.some((s: string, i: number) => current[i] !== s);
       if (scopesChanged) {
         variable.scopes = scopes as VariableScope[];
+        if (!isNew) summary.scopeChanges++;
       }
     }
 
     const codeSyntax = extensions["com.figma.codeSyntax"];
     if (codeSyntax) {
+      let codeSyntaxTokenChanged = false;
       for (const platform of Object.keys(codeSyntax) as CodeSyntaxPlatform[]) {
         if (variable.codeSyntax[platform] !== codeSyntax[platform]) {
           variable.setVariableCodeSyntax(platform, codeSyntax[platform]);
+          codeSyntaxTokenChanged = true;
         }
       }
+      if (codeSyntaxTokenChanged && !isNew) summary.codeSyntaxChanges++;
     }
   }
 }
@@ -385,7 +425,17 @@ figma.ui.onmessage = async (msg: any) => {
 
   if (msg.type === "import") {
     const collections = await figma.variables.getLocalVariableCollectionsAsync();
-    const summary: ImportSummary = { updated: 0, renamed: 0, created: 0, staleId: 0, notes: [] };
+    const summary: ImportSummary = {
+      created: 0,
+      deleted: 0,
+      updated: 0,
+      nameChanges: 0,
+      valueChanges: 0,
+      scopeChanges: 0,
+      descriptionChanges: 0,
+      codeSyntaxChanges: 0,
+      notes: [],
+    };
 
     const groups = msg.groups as {
       collectionId: string;

@@ -129,8 +129,10 @@ file(s):
 - `com.figma.codeSyntax` and alias bindings (`com.figma.aliasData`) are
   written back too, not just the raw value.
 
-The panel reports a summary: `updated / renamed / created / stale-ID
-fallback`, plus any notes (e.g. an alias target that couldn't be
+The panel reports a structured summary — `Created` / `Deleted` (the
+stale-ID-fallback case) / `Updated`, with `Updated` broken down by which
+field actually changed (`Name` / `Value` / `Scope` / `Description` /
+`Code Syntax`) — plus any notes (e.g. an alias target that couldn't be
 resolved).
 
 ## Token file format
