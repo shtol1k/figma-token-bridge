@@ -1,6 +1,6 @@
 /// <reference types="@figma/plugin-typings" />
 
-figma.showUI(__html__, { width: 380, height: 520 });
+figma.showUI(__html__, { width: 380, height: 120 });
 
 interface FolderByFile {
   [fileKey: string]: string;
@@ -319,11 +319,31 @@ async function importFile(
       variable.setValueForMode(modeId, toFigmaValue(node.$type, node.$value));
     }
 
+    const desiredDescription = node.$description ?? "";
+    if (variable.description !== desiredDescription) {
+      variable.description = desiredDescription;
+      summary.notes.push(`"${name}": description updated.`);
+    }
+
+    const scopes = extensions["com.figma.scopes"];
+    if (Array.isArray(scopes)) {
+      const current = variable.scopes;
+      const scopesChanged =
+        current.length !== scopes.length || scopes.some((s: string, i: number) => current[i] !== s);
+      if (scopesChanged) {
+        variable.scopes = scopes as VariableScope[];
+        summary.notes.push(`"${name}": scopes updated to [${scopes.join(", ")}].`);
+      }
+    }
+
     const codeSyntax = extensions["com.figma.codeSyntax"];
     if (codeSyntax) {
       for (const platform of Object.keys(codeSyntax) as CodeSyntaxPlatform[]) {
-        if (variable.codeSyntax[platform] !== codeSyntax[platform]) {
-          variable.setVariableCodeSyntax(platform, codeSyntax[platform]);
+        const current = variable.codeSyntax[platform];
+        const desired = codeSyntax[platform];
+        if (current !== desired) {
+          variable.setVariableCodeSyntax(platform, desired);
+          summary.notes.push(`"${name}": codeSyntax.${platform} "${current}" -> "${desired}".`);
         }
       }
     }
@@ -336,6 +356,11 @@ figma.ui.onmessage = async (msg: any) => {
     return;
   }
 
+  if (msg.type === "resize-ui") {
+    figma.ui.resize(msg.width, msg.height);
+    return;
+  }
+
   if (msg.type === "save-folder") {
     await setFolder(msg.folderPath);
     await sendCollections();
@@ -344,16 +369,19 @@ figma.ui.onmessage = async (msg: any) => {
 
   if (msg.type === "export") {
     const collections = await figma.variables.getLocalVariableCollectionsAsync();
-    const target = collections.find((c) => c.id === msg.collectionId);
-    if (!target) return;
+    const targets =
+      msg.collectionId === "ALL" ? collections : collections.filter((c) => c.id === msg.collectionId);
+    if (targets.length === 0) return;
 
     const files: { relativePath: string; content: unknown }[] = [];
-    for (const mode of target.modes) {
-      const tree = await serializeCollectionMode(target, mode.modeId);
-      files.push({
-        relativePath: `${target.name.toLowerCase()}/${mode.name.toLowerCase()}.tokens.json`,
-        content: tree,
-      });
+    for (const target of targets) {
+      for (const mode of target.modes) {
+        const tree = await serializeCollectionMode(target, mode.modeId);
+        files.push({
+          relativePath: `${target.name.toLowerCase()}/${mode.name.toLowerCase()}.tokens.json`,
+          content: tree,
+        });
+      }
     }
 
     figma.ui.postMessage({ type: "do-export", dir: msg.dir, files });

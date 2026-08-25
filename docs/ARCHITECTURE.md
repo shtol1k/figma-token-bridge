@@ -178,7 +178,15 @@ back as `{type:"VARIABLE_ALIAS", id}`, not as a plain value.
 `variable.setVariableCodeSyntax(platform, value)` whenever the JSON's
 value differs from the variable's current one — this is a real API
 method, not a plain property assignment; `variable.codeSyntax = {...}`
-does not work.
+does not work (`codeSyntax` is `readonly` on `Variable`).
+
+`description` and `scopes` are synced the same diff-based way —
+`variable.description` and `variable.scopes` are plain writable
+properties (unlike `codeSyntax`), so a direct assignment is correct
+there. Both are treated as fully authoritative from the JSON: a token
+exported without `$description` syncs the Figma variable's description
+to `""` rather than leaving whatever was there untouched, matching how
+Export already omits `$description` for an empty string.
 
 ## Bridge server: deliberately dumb
 
