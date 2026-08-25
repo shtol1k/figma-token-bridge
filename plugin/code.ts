@@ -181,6 +181,7 @@ interface ImportSummary {
   createdNames: Set<string>;
   deletedNames: Set<string>;
   updatedNames: Set<string>;
+  removedNames: Set<string>;
   nameChanges: number;
   valueChanges: number;
   scopeChanges: number;
@@ -241,6 +242,28 @@ function flattenTokens(
     }
   }
   return out;
+}
+
+/**
+ * Variables that exist in this Figma collection but aren't referenced by
+ * name in any of the files being imported for it — candidates for removal
+ * if the caller opts into delete-sync. Computed from file content alone,
+ * so it's safe to call both before (for the confirmation dialog) and
+ * after (to actually remove) the main import pass.
+ */
+async function computeMissingVariables(
+  collection: VariableCollection,
+  files: { filename: string; content: Record<string, any> }[],
+): Promise<Variable[]> {
+  const allLocalVars = await figma.variables.getLocalVariablesAsync();
+  const collectionVars = allLocalVars.filter((v) => v.variableCollectionId === collection.id);
+  const importedNames = new Set<string>();
+  for (const file of files) {
+    for (const { path } of flattenTokens(file.content)) {
+      importedNames.add(path.join("/"));
+    }
+  }
+  return collectionVars.filter((v) => !importedNames.has(v.name));
 }
 
 /**
@@ -433,12 +456,32 @@ figma.ui.onmessage = async (msg: any) => {
     return;
   }
 
+  if (msg.type === "check-import") {
+    const collections = await figma.variables.getLocalVariableCollectionsAsync();
+    const groups = msg.groups as {
+      collectionId: string;
+      files: { filename: string; content: Record<string, any> }[];
+    }[];
+
+    const missing: string[] = [];
+    for (const group of groups) {
+      const target = collections.find((c) => c.id === group.collectionId);
+      if (!target) continue;
+      const missingVars = await computeMissingVariables(target, group.files);
+      for (const v of missingVars) missing.push(v.name);
+    }
+
+    figma.ui.postMessage({ type: "import-check-result", missing });
+    return;
+  }
+
   if (msg.type === "import") {
     const collections = await figma.variables.getLocalVariableCollectionsAsync();
     const summary: ImportSummary = {
       createdNames: new Set(),
       deletedNames: new Set(),
       updatedNames: new Set(),
+      removedNames: new Set(),
       nameChanges: 0,
       valueChanges: 0,
       scopeChanges: 0,
@@ -456,6 +499,14 @@ figma.ui.onmessage = async (msg: any) => {
       const target = collections.find((c) => c.id === group.collectionId);
       if (!target) continue;
 
+      if (msg.deleteMissing) {
+        const missingVars = await computeMissingVariables(target, group.files);
+        for (const v of missingVars) {
+          summary.removedNames.add(v.name);
+          v.remove();
+        }
+      }
+
       for (const file of group.files) {
         const modeName = file.filename.replace(/\.tokens\.json$/, "");
         const mode = target.modes.find((m) => m.name.toLowerCase() === modeName.toLowerCase());
@@ -472,6 +523,7 @@ figma.ui.onmessage = async (msg: any) => {
       summary: {
         created: Array.from(summary.createdNames),
         deleted: Array.from(summary.deletedNames),
+        removed: Array.from(summary.removedNames),
         updated: Array.from(summary.updatedNames),
         nameChanges: summary.nameChanges,
         valueChanges: summary.valueChanges,

@@ -52,6 +52,17 @@
 
   <div id="log" class="text-[11px] text-neutral-700 whitespace-pre-wrap bg-neutral-50 rounded-md p-2"></div>
 
+  <div id="confirm-overlay" class="fixed inset-0 bg-black/40 items-center justify-center p-4" style="display: none;">
+    <div class="bg-white rounded-md shadow-lg p-3 w-full max-w-[280px]">
+      <div id="confirm-text" class="text-[11px] text-neutral-800 mb-2"></div>
+      <div id="confirm-list" class="text-[11px] text-neutral-500 max-h-24 overflow-y-auto mb-2 whitespace-pre-wrap"></div>
+      <div class="flex gap-1.5 justify-end">
+        <button data-action="confirm-cancel" class="h-7 px-3 text-[11px] rounded-md border border-neutral-300 bg-white hover:bg-neutral-50 cursor-pointer">Cancel</button>
+        <button data-action="confirm-continue" class="h-7 px-3 text-[11px] rounded-md bg-red-600 text-white hover:bg-red-700 cursor-pointer">Continue</button>
+      </div>
+    </div>
+  </div>
+
   <svg
     id="resize-handle"
     class="fixed bottom-0.5 right-0.5 text-neutral-400 hover:text-neutral-600"
@@ -232,20 +243,65 @@
         const isAll = state.selectedCollectionId === "ALL";
         const targets = isAll ? state.collections : state.collections.filter((c) => c.id === state.selectedCollectionId);
         if (targets.length === 0) return;
-        log("Importing", isAll ? "all collections" : targets[0].name, "info");
+        const label = isAll ? "all collections" : targets[0].name;
+        log("Checking", label, "info");
         try {
           const groups = await importGroupsFor(targets);
           if (groups.length === 0) {
             log("Nothing to import", "no token files found", "info");
             return;
           }
-          parent.postMessage({ pluginMessage: { type: "import", groups: groups } }, "*");
+
+          parent.postMessage({ pluginMessage: { type: "check-import", groups: groups } }, "*");
+          const missing = await waitForCheckResult();
+
+          let deleteMissing = false;
+          if (missing.length > 0) {
+            const proceed = await showConfirm(missing);
+            if (!proceed) {
+              log("Import cancelled", "", "info");
+              return;
+            }
+            deleteMissing = true;
+          }
+
+          log("Importing", label, "info");
+          parent.postMessage(
+            { pluginMessage: { type: "import", groups: groups, deleteMissing: deleteMissing } },
+            "*",
+          );
         } catch (err) {
           log("Import failed", err.message, "error");
         }
         return;
       }
     });
+
+    let pendingCheckResolve = null;
+
+    function waitForCheckResult() {
+      return new Promise((resolve) => {
+        pendingCheckResolve = resolve;
+      });
+    }
+
+    function showConfirm(missing) {
+      return new Promise((resolve) => {
+        const overlay = document.getElementById("confirm-overlay");
+        document.getElementById("confirm-text").textContent =
+          missing.length + " variable(s) will be deleted. Continue?";
+        document.getElementById("confirm-list").textContent = missing.join("\n");
+        overlay.style.display = "flex";
+
+        function finish(result) {
+          overlay.style.display = "none";
+          resolve(result);
+        }
+
+        document.getElementById("confirm-cancel").onclick = () => finish(false);
+        document.getElementById("confirm-continue").onclick = () => finish(true);
+      });
+    }
 
     window.onmessage = async (event) => {
       const msg = event.data.pluginMessage;
@@ -274,6 +330,14 @@
         }
       }
 
+      if (msg.type === "import-check-result") {
+        if (pendingCheckResolve) {
+          const resolve = pendingCheckResolve;
+          pendingCheckResolve = null;
+          resolve(msg.missing || []);
+        }
+      }
+
       if (msg.type === "import-result") {
         const s = msg.summary;
         const lines = [];
@@ -281,6 +345,10 @@
         for (const n of s.created) lines.push("- " + n);
         lines.push("Deleted: " + s.deleted.length);
         for (const n of s.deleted) lines.push("- " + n);
+        if (s.removed && s.removed.length > 0) {
+          lines.push("Removed: " + s.removed.length);
+          for (const n of s.removed) lines.push("- " + n);
+        }
         lines.push("Updated: " + s.updated.length);
         lines.push("- Name: " + s.nameChanges);
         lines.push("- Value: " + s.valueChanges);

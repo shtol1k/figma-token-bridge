@@ -189,6 +189,28 @@ exported without `$description` syncs the Figma variable's description
 to `""` rather than leaving whatever was there untouched, matching how
 Export already omits `$description` for an empty string.
 
+## Delete-sync: confirm-first, not silent
+
+Import only ever *acts* on tokens present in the file — a variable
+missing from the JSON is invisible to the main loop by construction, so
+deleting a token from a file has no effect on Figma by default. That's
+deliberate: an incomplete or partially-written JSON (an agent mid-edit,
+a bad export) would otherwise cause `figma.variables.getLocalVariablesAsync()`-driven
+deletion to silently wipe out anything the file happens not to mention,
+which is a much larger blast radius than anything else Import does.
+
+Delete IS supported, but gated behind an explicit two-phase flow:
+`computeMissingVariables()` (a pure read — diffs the collection's live
+variable names against every token path found in the files being
+imported) runs first via a `check-import` message, before anything is
+written. `ui.html` only shows the confirm-delete dialog when that
+returns a non-empty list; the actual `import` message carries
+`deleteMissing: true` only after the user clicks through it, and
+`computeMissingVariables()` runs a second time at that point (state may
+have shifted between the check and the confirm) immediately before
+calling `variable.remove()` on each. Cancelling degrades to a normal
+Import — creates/updates still happen, nothing gets removed.
+
 ## Bridge server: deliberately dumb
 
 `server/index.ts` is a single file on `node:http`, no framework, four

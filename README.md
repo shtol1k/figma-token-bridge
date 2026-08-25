@@ -177,10 +177,16 @@ Nesting follows the variable's Figma name, split on `/` (`content/surface/primar
 - Only **local** variables in the current file are read/written — a
   variable bound from an external published library isn't editable via
   the Plugin API and won't round-trip correctly.
-- No delete propagation in either direction: removing a token from a
-  JSON file doesn't delete the Figma variable, and deleting a variable in
+- No delete propagation from Figma to files: deleting a variable in
   Figma doesn't remove it from a previously-exported JSON file (the next
   Export naturally corrects this).
+- Removing a token from a JSON file **does** delete the matching Figma
+  variable on the next Import — but only after an explicit confirmation.
+  Before importing, the plugin checks which variables in the collection
+  aren't referenced by any of the files being imported and, if there are
+  any, shows a dialog listing them and asking to confirm before deleting
+  anything. Import proceeds normally (creates/updates, no deletions) if
+  you cancel.
 - This tool never touches anything outside the folder you point it at —
   it doesn't know about, and won't run, any downstream build step (e.g.
   a catalog-regeneration script in a consuming app repo). Re-run those
