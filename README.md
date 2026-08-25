@@ -81,32 +81,42 @@ does nothing until the plugin talks to it.
 
 ### 3. Set the tokens folder (once per Figma file)
 
-Click **Folder…** at the top of the plugin panel. A native folder picker
-opens (via the bridge server) — choose the folder where token JSON
-should live, e.g. a `docs/tokens/` directory in your app's repo. This is
-remembered per Figma file (keyed by `figma.fileKey` in the plugin's
-`clientStorage`), so different design files can point at different
-folders.
+Click the folder icon at the left of the panel's top row. A native
+folder picker opens (via the bridge server) — choose the folder where
+token JSON should live, e.g. a `docs/tokens/` directory in your app's
+repo. This is remembered per Figma file (keyed by `figma.fileKey` in the
+plugin's `clientStorage`), so different design files can point at
+different folders.
 
-### 4. Export (Figma → files)
+### 4. Pick a collection
 
-For each Variables collection listed in the panel, click **Export**.
-This writes `<folder>/<collection-name-lowercased>/<mode-lowercased>.tokens.json`
+The dropdown lists every local Variables collection, plus **All
+Collections** at the top. Selecting a real collection immediately checks
+that collection's subfolder and shows which `*.tokens.json` files are
+already there (or "Files not found" if none yet) — no extra click needed
+to see this.
+
+### 5. Export (Figma → files)
+
+Click **Export**. With a specific collection selected, it writes
+`<folder>/<collection-name-lowercased>/<mode-lowercased>.tokens.json`
 for every mode in that collection — e.g. a `theme` collection with
 `Light`/`Dark` modes produces `<folder>/theme/light.tokens.json` and
-`<folder>/theme/dark.tokens.json`.
+`<folder>/theme/dark.tokens.json`. With **All Collections** selected, it
+does this for every collection in one click.
 
 Each file uses the same DTCG shape Figma's own native export produces
 (`$type`, `$value`, `$description`, `$extensions["com.figma.*"]`),
 including `com.figma.variableId` — the mechanism this tool uses to
 survive renames on Import.
 
-### 5. Import (files → Figma)
+### 6. Import (files → Figma)
 
-Click **Import** next to a collection. The panel lists the
-`*.tokens.json` files found in that collection's subfolder as checkboxes
-— pick one or more, then **Import selected**. For every token in the
-selected file(s):
+Click **Import**. With a specific collection selected, it imports every
+`*.tokens.json` file already found in that collection's subfolder — all
+modes, no per-file picking. With **All Collections** selected, it does
+this for every collection at once. For every token in the imported
+file(s):
 
 - If it carries a `com.figma.variableId` that still resolves to a real
   variable, that variable is updated **by ID**, even if its name or

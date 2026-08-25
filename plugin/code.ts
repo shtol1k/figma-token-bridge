@@ -322,7 +322,6 @@ async function importFile(
     const desiredDescription = node.$description ?? "";
     if (variable.description !== desiredDescription) {
       variable.description = desiredDescription;
-      summary.notes.push(`"${name}": description updated.`);
     }
 
     const scopes = extensions["com.figma.scopes"];
@@ -332,18 +331,14 @@ async function importFile(
         current.length !== scopes.length || scopes.some((s: string, i: number) => current[i] !== s);
       if (scopesChanged) {
         variable.scopes = scopes as VariableScope[];
-        summary.notes.push(`"${name}": scopes updated to [${scopes.join(", ")}].`);
       }
     }
 
     const codeSyntax = extensions["com.figma.codeSyntax"];
     if (codeSyntax) {
       for (const platform of Object.keys(codeSyntax) as CodeSyntaxPlatform[]) {
-        const current = variable.codeSyntax[platform];
-        const desired = codeSyntax[platform];
-        if (current !== desired) {
-          variable.setVariableCodeSyntax(platform, desired);
-          summary.notes.push(`"${name}": codeSyntax.${platform} "${current}" -> "${desired}".`);
+        if (variable.codeSyntax[platform] !== codeSyntax[platform]) {
+          variable.setVariableCodeSyntax(platform, codeSyntax[platform]);
         }
       }
     }
@@ -390,19 +385,26 @@ figma.ui.onmessage = async (msg: any) => {
 
   if (msg.type === "import") {
     const collections = await figma.variables.getLocalVariableCollectionsAsync();
-    const target = collections.find((c) => c.id === msg.collectionId);
-    if (!target) return;
-
     const summary: ImportSummary = { updated: 0, renamed: 0, created: 0, staleId: 0, notes: [] };
 
-    for (const file of msg.files as { filename: string; content: Record<string, any> }[]) {
-      const modeName = file.filename.replace(/\.tokens\.json$/, "");
-      const mode = target.modes.find((m) => m.name.toLowerCase() === modeName.toLowerCase());
-      if (!mode) {
-        summary.notes.push(`No mode matching file "${file.filename}" — skipped.`);
-        continue;
+    const groups = msg.groups as {
+      collectionId: string;
+      files: { filename: string; content: Record<string, any> }[];
+    }[];
+
+    for (const group of groups) {
+      const target = collections.find((c) => c.id === group.collectionId);
+      if (!target) continue;
+
+      for (const file of group.files) {
+        const modeName = file.filename.replace(/\.tokens\.json$/, "");
+        const mode = target.modes.find((m) => m.name.toLowerCase() === modeName.toLowerCase());
+        if (!mode) {
+          summary.notes.push(`No mode matching file "${file.filename}" in "${target.name}" — skipped.`);
+          continue;
+        }
+        await importFile(target, mode.modeId, file.content, summary);
       }
-      await importFile(target, mode.modeId, file.content, summary);
     }
 
     figma.ui.postMessage({ type: "import-result", summary });
