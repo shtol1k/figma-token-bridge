@@ -178,9 +178,9 @@ async function serializeCollectionMode(
 }
 
 interface ImportSummary {
-  created: number;
-  deleted: number;
-  updated: number;
+  createdNames: Set<string>;
+  deletedNames: Set<string>;
+  updatedNames: Set<string>;
   nameChanges: number;
   valueChanges: number;
   scopeChanges: number;
@@ -291,7 +291,7 @@ async function importFile(
 
     if (!variable) {
       if (variableId) {
-        summary.deleted++;
+        summary.deletedNames.add(name);
       }
       const byName = findByName(name);
       if (byName) {
@@ -301,28 +301,22 @@ async function importFile(
             `"${name}": stale/removed ID ${variableId} — matched an existing variable by name instead (${byName.id}).`,
           );
         }
-      } else if (variableId) {
-        summary.notes.push(
-          `"${name}": stale/removed ID ${variableId}, no name match either — creating new.`,
-        );
       }
     }
 
     let isNew = false;
+    let tokenChanged = false;
     if (!variable) {
       isNew = true;
       variable = figma.variables.createVariable(name, collection, typeToResolvedType(node.$type));
       collectionVars.push(variable);
       allLocalVars.push(variable);
       liveIds.add(variable.id);
-      summary.created++;
-      summary.notes.push(`"${name}": created new variable ${variable.id}.`);
-    } else {
-      summary.updated++;
-      if (variable.name !== name) {
-        variable.name = name;
-        summary.nameChanges++;
-      }
+      summary.createdNames.add(name);
+    } else if (variable.name !== name) {
+      variable.name = name;
+      summary.nameChanges++;
+      tokenChanged = true;
     }
 
     const aliasData = extensions["com.figma.aliasData"];
@@ -350,14 +344,20 @@ async function importFile(
       const unchanged = !isNew && currentValue !== undefined && valuesEqual(currentValue, desiredValue);
       if (!unchanged) {
         variable.setValueForMode(modeId, desiredValue);
-        if (!isNew) summary.valueChanges++;
+        if (!isNew) {
+          summary.valueChanges++;
+          tokenChanged = true;
+        }
       }
     }
 
     const desiredDescription = node.$description ?? "";
     if (variable.description !== desiredDescription) {
       variable.description = desiredDescription;
-      if (!isNew) summary.descriptionChanges++;
+      if (!isNew) {
+        summary.descriptionChanges++;
+        tokenChanged = true;
+      }
     }
 
     const scopes = extensions["com.figma.scopes"];
@@ -367,7 +367,10 @@ async function importFile(
         current.length !== scopes.length || scopes.some((s: string, i: number) => current[i] !== s);
       if (scopesChanged) {
         variable.scopes = scopes as VariableScope[];
-        if (!isNew) summary.scopeChanges++;
+        if (!isNew) {
+          summary.scopeChanges++;
+          tokenChanged = true;
+        }
       }
     }
 
@@ -380,7 +383,14 @@ async function importFile(
           codeSyntaxTokenChanged = true;
         }
       }
-      if (codeSyntaxTokenChanged && !isNew) summary.codeSyntaxChanges++;
+      if (codeSyntaxTokenChanged && !isNew) {
+        summary.codeSyntaxChanges++;
+        tokenChanged = true;
+      }
+    }
+
+    if (!isNew && tokenChanged) {
+      summary.updatedNames.add(name);
     }
   }
 }
@@ -426,9 +436,9 @@ figma.ui.onmessage = async (msg: any) => {
   if (msg.type === "import") {
     const collections = await figma.variables.getLocalVariableCollectionsAsync();
     const summary: ImportSummary = {
-      created: 0,
-      deleted: 0,
-      updated: 0,
+      createdNames: new Set(),
+      deletedNames: new Set(),
+      updatedNames: new Set(),
       nameChanges: 0,
       valueChanges: 0,
       scopeChanges: 0,
@@ -457,7 +467,20 @@ figma.ui.onmessage = async (msg: any) => {
       }
     }
 
-    figma.ui.postMessage({ type: "import-result", summary });
+    figma.ui.postMessage({
+      type: "import-result",
+      summary: {
+        created: Array.from(summary.createdNames),
+        deleted: Array.from(summary.deletedNames),
+        updated: Array.from(summary.updatedNames),
+        nameChanges: summary.nameChanges,
+        valueChanges: summary.valueChanges,
+        scopeChanges: summary.scopeChanges,
+        descriptionChanges: summary.descriptionChanges,
+        codeSyntaxChanges: summary.codeSyntaxChanges,
+        notes: summary.notes,
+      },
+    });
   }
 };
 

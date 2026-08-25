@@ -129,11 +129,14 @@ file(s):
 - `com.figma.codeSyntax` and alias bindings (`com.figma.aliasData`) are
   written back too, not just the raw value.
 
-The panel reports a structured summary — `Created` / `Deleted` (the
-stale-ID-fallback case) / `Updated`, with `Updated` broken down by which
-field actually changed (`Name` / `Value` / `Scope` / `Description` /
-`Code Syntax`) — plus any notes (e.g. an alias target that couldn't be
-resolved).
+The panel reports a structured summary — `Created` and `Deleted` (the
+stale-ID-fallback case) list the affected token names underneath;
+`Updated` is broken down by which field actually changed (`Name` /
+`Value` / `Scope` / `Description` / `Code Syntax`). Every count is
+deduplicated by token name across all imported mode files, so a token
+present in both `light.tokens.json` and `dark.tokens.json` isn't counted
+twice just because it was processed twice — plus any notes (e.g. an
+alias target that couldn't be resolved).
 
 ## Token file format
 

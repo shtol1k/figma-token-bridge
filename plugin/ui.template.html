@@ -101,12 +101,12 @@
       kind = kind || "info";
       const icon = ICONS[kind];
       const detailHtml = detail
-        ? '<span class="text-neutral-600"> ' + escapeHtml(detail) + "</span>"
+        ? '<div class="text-neutral-600 mt-0.5">' + escapeHtml(detail) + "</div>"
         : "";
       document.getElementById("log").innerHTML =
         '<div class="flex items-start gap-1.5">' +
           '<span class="mt-0.5 shrink-0">' + icon + "</span>" +
-          '<span><span class="font-semibold ' + TITLE_COLOR[kind] + '">' + escapeHtml(title) + "</span>" +
+          '<span class="min-w-0 flex-1"><span class="font-semibold ' + TITLE_COLOR[kind] + '">' + escapeHtml(title) + "</span>" +
             detailHtml +
           "</span>" +
         "</div>";
@@ -276,19 +276,21 @@
 
       if (msg.type === "import-result") {
         const s = msg.summary;
-        let detail =
-          "Created: " + s.created + "\n" +
-          "Deleted: " + s.deleted + "\n" +
-          "Updated: " + s.updated + "\n" +
-          "- Name: " + s.nameChanges + "\n" +
-          "- Value: " + s.valueChanges + "\n" +
-          "- Scope: " + s.scopeChanges + "\n" +
-          "- Description: " + s.descriptionChanges + "\n" +
-          "- Code Syntax: " + s.codeSyntaxChanges;
+        const lines = [];
+        lines.push("Created: " + s.created.length);
+        for (const n of s.created) lines.push("- " + n);
+        lines.push("Deleted: " + s.deleted.length);
+        for (const n of s.deleted) lines.push("- " + n);
+        lines.push("Updated: " + s.updated.length);
+        lines.push("- Name: " + s.nameChanges);
+        lines.push("- Value: " + s.valueChanges);
+        lines.push("- Scope: " + s.scopeChanges);
+        lines.push("- Description: " + s.descriptionChanges);
+        lines.push("- Code Syntax: " + s.codeSyntaxChanges);
         if (s.notes && s.notes.length > 0) {
-          detail += "\n" + s.notes.join("\n");
+          lines.push(...s.notes);
         }
-        log("Import done", detail, "success");
+        log("Import done", lines.join("\n"), "success");
       }
     };
 
