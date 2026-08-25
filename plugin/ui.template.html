@@ -53,12 +53,19 @@
   <div id="log" class="text-[11px] text-neutral-700 whitespace-pre-wrap bg-neutral-50 rounded-md p-2"></div>
 
   <div id="confirm-overlay" class="fixed inset-0 bg-black/40 items-center justify-center p-4" style="display: none;">
-    <div class="bg-white rounded-md shadow-lg p-3 w-full max-w-[280px]">
-      <div id="confirm-text" class="text-[11px] text-neutral-800 mb-2"></div>
+    <div class="relative bg-white rounded-md shadow-lg p-3 w-full max-w-[280px]">
+      <button
+        id="confirm-close"
+        class="absolute top-1.5 right-1.5 text-neutral-400 hover:text-neutral-600 cursor-pointer"
+        title="Cancel"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+      </button>
+      <div id="confirm-text" class="text-[11px] text-neutral-800 mb-2 pr-4"></div>
       <div id="confirm-list" class="text-[11px] text-neutral-500 max-h-24 overflow-y-auto mb-2 whitespace-pre-wrap"></div>
       <div class="flex gap-1.5 justify-end">
-        <button data-action="confirm-cancel" class="h-7 px-3 text-[11px] rounded-md border border-neutral-300 bg-white hover:bg-neutral-50 cursor-pointer">Cancel</button>
-        <button data-action="confirm-continue" class="h-7 px-3 text-[11px] rounded-md bg-red-600 text-white hover:bg-red-700 cursor-pointer">Continue</button>
+        <button id="confirm-cancel" class="h-7 px-3 text-[11px] rounded-md border border-neutral-300 bg-white hover:bg-neutral-50 cursor-pointer">Cancel</button>
+        <button id="confirm-continue" class="h-7 px-3 text-[11px] rounded-md bg-red-600 text-white hover:bg-red-700 cursor-pointer">Continue</button>
       </div>
     </div>
   </div>
@@ -300,6 +307,7 @@
 
         document.getElementById("confirm-cancel").onclick = () => finish(false);
         document.getElementById("confirm-continue").onclick = () => finish(true);
+        document.getElementById("confirm-close").onclick = () => finish(false);
       });
     }
 
