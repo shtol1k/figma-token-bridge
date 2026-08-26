@@ -110,6 +110,23 @@ Each file uses the same DTCG shape Figma's own native export produces
 including `com.figma.variableId` — the mechanism this tool uses to
 survive renames on Import.
 
+Before overwriting, Export reads whatever was already at that path and
+diffs it against the fresh Figma state (matched by `com.figma.variableId`,
+same as Import), so the result reads the same way an Import result
+does — a token missing from Figma since the last Export shows up under
+`Deleted` immediately, without having to notice it by hand:
+
+```
+Created: 1
+Deleted: 0
+Updated: 3
+- Name: 0
+- Value: 3
+- Scope: 0
+- Description: 0
+- Code Syntax: 0
+```
+
 ### 6. Import (files → Figma)
 
 Click **Import**. With a specific collection selected, it imports every

@@ -134,6 +134,106 @@
       return name.toLowerCase();
     }
 
+    function flattenJsonTokens(obj, prefix) {
+      prefix = prefix || [];
+      const out = [];
+      for (const key of Object.keys(obj || {})) {
+        const val = obj[key];
+        if (val && typeof val === "object" && "$value" in val) {
+          out.push({ path: prefix.concat([key]).join("/"), node: val });
+        } else if (val && typeof val === "object") {
+          out.push.apply(out, flattenJsonTokens(val, prefix.concat([key])));
+        }
+      }
+      return out;
+    }
+
+    function diffExportFile(oldContent, newContent) {
+      const oldTokens = flattenJsonTokens(oldContent);
+      const newTokens = flattenJsonTokens(newContent);
+      const oldById = new Map();
+      for (const t of oldTokens) {
+        const id = t.node.$extensions && t.node.$extensions["com.figma.variableId"];
+        if (id) oldById.set(id, t);
+      }
+
+      const result = {
+        created: [],
+        deleted: [],
+        updated: [],
+        nameChanges: 0,
+        valueChanges: 0,
+        scopeChanges: 0,
+        descriptionChanges: 0,
+        codeSyntaxChanges: 0,
+      };
+      const matchedOldIds = new Set();
+
+      for (const t of newTokens) {
+        const id = t.node.$extensions && t.node.$extensions["com.figma.variableId"];
+        const old = id ? oldById.get(id) : null;
+        if (!old) {
+          result.created.push(t.path);
+          continue;
+        }
+        matchedOldIds.add(id);
+        let changed = false;
+        if (old.path !== t.path) {
+          result.nameChanges++;
+          changed = true;
+        }
+        if (JSON.stringify(old.node.$value) !== JSON.stringify(t.node.$value)) {
+          result.valueChanges++;
+          changed = true;
+        }
+        const oldScopes = (old.node.$extensions && old.node.$extensions["com.figma.scopes"]) || [];
+        const newScopes = (t.node.$extensions && t.node.$extensions["com.figma.scopes"]) || [];
+        if (JSON.stringify(oldScopes) !== JSON.stringify(newScopes)) {
+          result.scopeChanges++;
+          changed = true;
+        }
+        if ((old.node.$description || "") !== (t.node.$description || "")) {
+          result.descriptionChanges++;
+          changed = true;
+        }
+        const oldCS = (old.node.$extensions && old.node.$extensions["com.figma.codeSyntax"]) || {};
+        const newCS = (t.node.$extensions && t.node.$extensions["com.figma.codeSyntax"]) || {};
+        if (JSON.stringify(oldCS) !== JSON.stringify(newCS)) {
+          result.codeSyntaxChanges++;
+          changed = true;
+        }
+        if (changed) result.updated.push(t.path);
+      }
+
+      for (const t of oldTokens) {
+        const id = t.node.$extensions && t.node.$extensions["com.figma.variableId"];
+        if (id && !matchedOldIds.has(id)) {
+          result.deleted.push(t.path);
+        }
+      }
+
+      return result;
+    }
+
+    async function readOldContent(dir, relativePath) {
+      const slashIndex = relativePath.lastIndexOf("/");
+      const subDir = slashIndex === -1 ? dir : dir + "/" + relativePath.slice(0, slashIndex);
+      const filename = slashIndex === -1 ? relativePath : relativePath.slice(slashIndex + 1);
+      try {
+        const res = await fetch(BRIDGE + "/read-files", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dir: subDir, files: [filename] }),
+        });
+        const data = await res.json();
+        const content = data[filename];
+        if (!content || content.__error) return null;
+        return content;
+      } catch (err) {
+        return null;
+      }
+    }
+
     function selectedCollection() {
       return state.collections.find((c) => c.id === state.selectedCollectionId) || null;
     }
@@ -327,13 +427,48 @@
 
       if (msg.type === "do-export") {
         try {
+          const agg = {
+            createdNames: new Set(),
+            deletedNames: new Set(),
+            updatedNames: new Set(),
+            nameChanges: 0,
+            valueChanges: 0,
+            scopeChanges: 0,
+            descriptionChanges: 0,
+            codeSyntaxChanges: 0,
+          };
+          for (const f of msg.files) {
+            const oldContent = await readOldContent(msg.dir, f.relativePath);
+            const d = diffExportFile(oldContent, f.content);
+            for (const n of d.created) agg.createdNames.add(n);
+            for (const n of d.deleted) agg.deletedNames.add(n);
+            for (const n of d.updated) agg.updatedNames.add(n);
+            agg.nameChanges += d.nameChanges;
+            agg.valueChanges += d.valueChanges;
+            agg.scopeChanges += d.scopeChanges;
+            agg.descriptionChanges += d.descriptionChanges;
+            agg.codeSyntaxChanges += d.codeSyntaxChanges;
+          }
+
           const res = await fetch(BRIDGE + "/export", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ dir: msg.dir, files: msg.files }),
           });
-          const data = await res.json();
-          log("Exported", data.written.length + " file(s)", "success");
+          await res.json();
+
+          const lines = [];
+          lines.push("Created: " + agg.createdNames.size);
+          for (const n of agg.createdNames) lines.push("- " + n);
+          lines.push("Deleted: " + agg.deletedNames.size);
+          for (const n of agg.deletedNames) lines.push("- " + n);
+          lines.push("Updated: " + agg.updatedNames.size);
+          lines.push("- Name: " + agg.nameChanges);
+          lines.push("- Value: " + agg.valueChanges);
+          lines.push("- Scope: " + agg.scopeChanges);
+          lines.push("- Description: " + agg.descriptionChanges);
+          lines.push("- Code Syntax: " + agg.codeSyntaxChanges);
+          log("Exported", lines.join("\n"), "success");
           refreshFileStatus();
         } catch (err) {
           log("Export failed", err.message, "error");
