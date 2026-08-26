@@ -1,6 +1,6 @@
 /// <reference types="@figma/plugin-typings" />
 
-figma.showUI(__html__, { width: 380, height: 120 });
+figma.showUI(__html__, { width: 380, height: 220 });
 
 interface FolderByFile {
   [fileKey: string]: string;
