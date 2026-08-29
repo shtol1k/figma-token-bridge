@@ -418,6 +418,263 @@ async function importFile(
   }
 }
 
+type StyleKind = "PAINT" | "TEXT" | "EFFECT" | "GRID";
+
+async function getLocalStyles(kind: StyleKind): Promise<BaseStyle[]> {
+  if (kind === "PAINT") return figma.getLocalPaintStylesAsync();
+  if (kind === "TEXT") return figma.getLocalTextStylesAsync();
+  if (kind === "EFFECT") return figma.getLocalEffectStylesAsync();
+  return figma.getLocalGridStylesAsync();
+}
+
+function createStyleOfKind(kind: StyleKind): BaseStyle {
+  if (kind === "PAINT") return figma.createPaintStyle();
+  if (kind === "TEXT") return figma.createTextStyle();
+  if (kind === "EFFECT") return figma.createEffectStyle();
+  return figma.createGridStyle();
+}
+
+/**
+ * Paint/Effect/Grid styles can each hold an *array* of layers (multiple
+ * paints, multiple shadows/blurs, multiple grids) — richer than a single
+ * value, and not something the W3C color/shadow composite types cover
+ * cleanly. Represented as a Figma-specific `$type` with the raw array as
+ * `$value` (deep-cloned to strip Figma's read-only wrapper objects down
+ * to plain JSON) rather than force-fitting into a spec type that would
+ * lose data. Text styles are close enough to the spec's `typography`
+ * composite to use it directly, with the properties DTCG doesn't have a
+ * slot for (paragraph spacing, text case, etc.) carried in `$extensions`.
+ */
+function serializeStyleValue(kind: StyleKind, style: BaseStyle): { type: string; value: unknown; extras?: unknown } {
+  if (kind === "PAINT") {
+    return { type: "figmaPaint", value: JSON.parse(JSON.stringify((style as PaintStyle).paints)) };
+  }
+  if (kind === "EFFECT") {
+    return { type: "figmaEffect", value: JSON.parse(JSON.stringify((style as EffectStyle).effects)) };
+  }
+  if (kind === "GRID") {
+    return { type: "figmaGrid", value: JSON.parse(JSON.stringify((style as GridStyle).layoutGrids)) };
+  }
+  const t = style as TextStyle;
+  return {
+    type: "typography",
+    value: {
+      fontFamily: t.fontName.family,
+      fontWeight: t.fontName.style,
+      fontSize: t.fontSize,
+      letterSpacing: JSON.parse(JSON.stringify(t.letterSpacing)),
+      lineHeight: JSON.parse(JSON.stringify(t.lineHeight)),
+    },
+    extras: {
+      paragraphIndent: t.paragraphIndent,
+      paragraphSpacing: t.paragraphSpacing,
+      listSpacing: t.listSpacing,
+      textCase: t.textCase,
+      textDecoration: t.textDecoration,
+      leadingTrim: t.leadingTrim,
+      hangingPunctuation: t.hangingPunctuation,
+      hangingList: t.hangingList,
+    },
+  };
+}
+
+async function serializeStyles(kind: StyleKind): Promise<Record<string, unknown>> {
+  const styles = await getLocalStyles(kind);
+  const root: Record<string, unknown> = {};
+
+  for (const s of styles) {
+    const { type, value, extras } = serializeStyleValue(kind, s);
+    const extensions: Record<string, unknown> = { "com.figma.styleId": s.id };
+    if (extras) extensions["com.figma.textStyleExtras"] = extras;
+
+    const leaf: Record<string, unknown> = { $type: type, $value: value };
+    if (s.description) leaf.$description = s.description;
+    leaf.$extensions = extensions;
+
+    setPath(root, s.name.split("/"), leaf);
+  }
+
+  return root;
+}
+
+/** Style-kind equivalent of computeMissingVariables — same reasoning applies. */
+async function computeMissingStyles(
+  kind: StyleKind,
+  files: { filename: string; content: Record<string, any> }[],
+): Promise<BaseStyle[]> {
+  const allStyles = await getLocalStyles(kind);
+  const importedNames = new Set<string>();
+  for (const file of files) {
+    for (const { path } of flattenTokens(file.content)) {
+      importedNames.add(path.join("/"));
+    }
+  }
+  return allStyles.filter((s) => !importedNames.has(s.name));
+}
+
+/**
+ * Same ID-first-then-name matching and tombstone-safety as importFile,
+ * adapted for styles: no modes (one value, not one per mode), no aliasing,
+ * no scopes/codeSyntax (Style has neither) — Description and the kind-
+ * specific value are the only fields that can change on an existing style.
+ */
+async function importStyleFile(
+  kind: StyleKind,
+  content: Record<string, any>,
+  summary: ImportSummary,
+): Promise<void> {
+  const tokens = flattenTokens(content);
+  const allStyles = await getLocalStyles(kind);
+  const liveIds = new Set(allStyles.map((s) => s.id));
+
+  for (const { path: tokenPath, node } of tokens) {
+    const name = tokenPath.join("/");
+    const extensions = node.$extensions ?? {};
+    const styleId: string | undefined = extensions["com.figma.styleId"];
+
+    let style: BaseStyle | null = null;
+    if (styleId && liveIds.has(styleId)) {
+      style = await figma.getStyleByIdAsync(styleId);
+    }
+
+    if (!style) {
+      if (styleId) {
+        summary.deletedNames.add(name);
+      }
+      const byName = allStyles.find((s) => s.name === name) ?? null;
+      if (byName) {
+        style = byName;
+        if (styleId) {
+          summary.notes.push(
+            `"${name}": stale/removed style ID ${styleId} — matched an existing style by name instead (${byName.id}).`,
+          );
+        }
+      }
+    }
+
+    let isNew = false;
+    let tokenChanged = false;
+    if (!style) {
+      isNew = true;
+      style = createStyleOfKind(kind);
+      style.name = name;
+      allStyles.push(style);
+      liveIds.add(style.id);
+      summary.createdNames.add(name);
+    } else if (style.name !== name) {
+      style.name = name;
+      summary.nameChanges++;
+      tokenChanged = true;
+    }
+
+    if (kind === "TEXT") {
+      const v = node.$value;
+      const t = style as TextStyle;
+      const desiredFontName: FontName = { family: v.fontFamily, style: v.fontWeight };
+      await figma.loadFontAsync(desiredFontName);
+      const valueChanged =
+        !isNew &&
+        (JSON.stringify(t.fontName) !== JSON.stringify(desiredFontName) ||
+          t.fontSize !== v.fontSize ||
+          JSON.stringify(t.letterSpacing) !== JSON.stringify(v.letterSpacing) ||
+          JSON.stringify(t.lineHeight) !== JSON.stringify(v.lineHeight));
+      t.fontName = desiredFontName;
+      t.fontSize = v.fontSize;
+      t.letterSpacing = v.letterSpacing;
+      t.lineHeight = v.lineHeight;
+
+      const extras = extensions["com.figma.textStyleExtras"];
+      if (extras) {
+        if (extras.paragraphIndent !== undefined) t.paragraphIndent = extras.paragraphIndent;
+        if (extras.paragraphSpacing !== undefined) t.paragraphSpacing = extras.paragraphSpacing;
+        if (extras.listSpacing !== undefined) t.listSpacing = extras.listSpacing;
+        if (extras.textCase !== undefined) t.textCase = extras.textCase;
+        if (extras.textDecoration !== undefined) t.textDecoration = extras.textDecoration;
+        if (extras.leadingTrim !== undefined) t.leadingTrim = extras.leadingTrim;
+        if (extras.hangingPunctuation !== undefined) t.hangingPunctuation = extras.hangingPunctuation;
+        if (extras.hangingList !== undefined) t.hangingList = extras.hangingList;
+      }
+      if (valueChanged) {
+        summary.valueChanges++;
+        tokenChanged = true;
+      }
+    } else if (kind === "PAINT") {
+      const p = style as PaintStyle;
+      const desired = node.$value as Paint[];
+      if (isNew || JSON.stringify(p.paints) !== JSON.stringify(desired)) {
+        p.paints = desired;
+        if (!isNew) {
+          summary.valueChanges++;
+          tokenChanged = true;
+        }
+      }
+    } else if (kind === "EFFECT") {
+      const e = style as EffectStyle;
+      const desired = node.$value as Effect[];
+      if (isNew || JSON.stringify(e.effects) !== JSON.stringify(desired)) {
+        e.effects = desired;
+        if (!isNew) {
+          summary.valueChanges++;
+          tokenChanged = true;
+        }
+      }
+    } else {
+      const g = style as GridStyle;
+      const desired = node.$value as LayoutGrid[];
+      if (isNew || JSON.stringify(g.layoutGrids) !== JSON.stringify(desired)) {
+        g.layoutGrids = desired;
+        if (!isNew) {
+          summary.valueChanges++;
+          tokenChanged = true;
+        }
+      }
+    }
+
+    const desiredDescription = node.$description ?? "";
+    if (style.description !== desiredDescription) {
+      style.description = desiredDescription;
+      if (!isNew) {
+        summary.descriptionChanges++;
+        tokenChanged = true;
+      }
+    }
+
+    if (!isNew && tokenChanged) {
+      summary.updatedNames.add(name);
+    }
+  }
+}
+
+function emptyImportSummary(): ImportSummary {
+  return {
+    createdNames: new Set(),
+    deletedNames: new Set(),
+    updatedNames: new Set(),
+    removedNames: new Set(),
+    nameChanges: 0,
+    valueChanges: 0,
+    scopeChanges: 0,
+    descriptionChanges: 0,
+    codeSyntaxChanges: 0,
+    notes: [],
+  };
+}
+
+function summaryToMessage(summary: ImportSummary) {
+  return {
+    created: Array.from(summary.createdNames),
+    deleted: Array.from(summary.deletedNames),
+    removed: Array.from(summary.removedNames),
+    updated: Array.from(summary.updatedNames),
+    nameChanges: summary.nameChanges,
+    valueChanges: summary.valueChanges,
+    scopeChanges: summary.scopeChanges,
+    descriptionChanges: summary.descriptionChanges,
+    codeSyntaxChanges: summary.codeSyntaxChanges,
+    notes: summary.notes,
+  };
+}
+
 figma.ui.onmessage = async (msg: any) => {
   if (msg.type === "get-collections") {
     await sendCollections();
@@ -533,6 +790,49 @@ figma.ui.onmessage = async (msg: any) => {
         notes: summary.notes,
       },
     });
+    return;
+  }
+
+  if (msg.type === "export-styles") {
+    const kinds = msg.kinds as StyleKind[];
+    const files: { relativePath: string; content: unknown }[] = [];
+    for (const kind of kinds) {
+      const tree = await serializeStyles(kind);
+      files.push({ relativePath: `styles/${kind.toLowerCase()}.tokens.json`, content: tree });
+    }
+    figma.ui.postMessage({ type: "do-export", dir: msg.dir, files });
+    return;
+  }
+
+  if (msg.type === "check-import-styles") {
+    const groups = msg.groups as { kind: StyleKind; files: { filename: string; content: Record<string, any> }[] }[];
+    const missing: string[] = [];
+    for (const group of groups) {
+      const missingStyles = await computeMissingStyles(group.kind, group.files);
+      for (const s of missingStyles) missing.push(s.name);
+    }
+    figma.ui.postMessage({ type: "import-check-result", missing });
+    return;
+  }
+
+  if (msg.type === "import-styles") {
+    const summary = emptyImportSummary();
+    const groups = msg.groups as { kind: StyleKind; files: { filename: string; content: Record<string, any> }[] }[];
+
+    for (const group of groups) {
+      if (msg.deleteMissing) {
+        const missingStyles = await computeMissingStyles(group.kind, group.files);
+        for (const s of missingStyles) {
+          summary.removedNames.add(s.name);
+          s.remove();
+        }
+      }
+      for (const file of group.files) {
+        await importStyleFile(group.kind, file.content, summary);
+      }
+    }
+
+    figma.ui.postMessage({ type: "import-result", summary: summaryToMessage(summary) });
   }
 };
 

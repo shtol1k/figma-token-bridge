@@ -90,16 +90,21 @@ remembered per Figma file (keyed by `figma.fileKey` in the plugin's
 folders.
 
 Next to it, a **Variables / Styles** switch picks what the dropdown
-below lists. Styles sync isn't implemented yet — the switch is there,
-but Export/Import stay disabled while "Styles" is selected.
+below lists and what Export/Import act on.
 
-### 4. Pick a collection
+### 4. Pick a collection or style type
 
-The dropdown lists every local Variables collection, plus **All
-Collections** at the top. Selecting a real collection immediately checks
-that collection's subfolder and shows which `*.tokens.json` files are
-already there (or "Files not found" if none yet) — no extra click needed
-to see this.
+In **Variables** mode, the dropdown lists every local Variables
+collection, plus **All Collections** at the top. In **Styles** mode, it
+lists **All Styles**, **Text styles**, **Color styles** (Paint styles),
+**Effect styles**, and **Layout guide styles** (Grid styles). Either
+way, selecting a real entry immediately checks the relevant subfolder
+and shows which `*.tokens.json` files are already there (or "Files not
+found" if none yet) — no extra click needed to see this.
+
+Styles have no modes (a Paint/Text/Effect/Grid style is one flat value,
+unlike a Variable's light/dark), so each style *type* gets exactly one
+file: `<folder>/styles/{paint,text,effect,grid}.tokens.json`.
 
 ### 5. Export (Figma → files)
 
@@ -192,6 +197,45 @@ Figma's own `com.figma.*` extensions:
 ```
 
 Nesting follows the variable's Figma name, split on `/` (`content/surface/primary`).
+
+## Style file format
+
+Styles use `com.figma.styleId` instead of `com.figma.variableId` as the
+survives-a-rename key, and no `com.figma.scopes`/`com.figma.codeSyntax`
+(neither concept exists on a Style). Text styles map onto the DTCG
+`typography` composite type, with the properties the spec has no slot
+for (paragraph spacing, text case, leading trim, …) carried in
+`com.figma.textStyleExtras`:
+
+```json
+{
+  "body": {
+    "$type": "typography",
+    "$value": {
+      "fontFamily": "Inter",
+      "fontWeight": "Regular",
+      "fontSize": 14,
+      "letterSpacing": { "value": 0, "unit": "PIXELS" },
+      "lineHeight": { "value": 20, "unit": "PIXELS" }
+    },
+    "$extensions": {
+      "com.figma.styleId": "S:abc123...",
+      "com.figma.textStyleExtras": { "paragraphSpacing": 0, "textCase": "ORIGINAL", "…": "…" }
+    }
+  }
+}
+```
+
+Paint, Effect, and Grid styles can each hold an *array* of layers (a
+paint style can stack a gradient over a solid; an effect style can
+combine multiple shadows and blurs) — richer than a single value, and
+not something the W3C spec's `color`/`shadow` types cover without losing
+data. These use Figma-specific `$type` values (`figmaPaint`,
+`figmaEffect`, `figmaGrid`) with the raw Figma layer array as `$value`,
+rather than force-fitting into a spec type that can't represent it.
+These are deliberate deviations from strict DTCG compliance — a
+generic DTCG consumer won't know what to do with them, but nothing in
+this tool's own Export/Import round-trip loses fidelity over it.
 
 ## Limitations
 

@@ -166,12 +166,18 @@
       return out;
     }
 
+    function tokenId(node) {
+      const ext = node.$extensions;
+      if (!ext) return null;
+      return ext["com.figma.variableId"] || ext["com.figma.styleId"] || null;
+    }
+
     function diffExportFile(oldContent, newContent) {
       const oldTokens = flattenJsonTokens(oldContent);
       const newTokens = flattenJsonTokens(newContent);
       const oldById = new Map();
       for (const t of oldTokens) {
-        const id = t.node.$extensions && t.node.$extensions["com.figma.variableId"];
+        const id = tokenId(t.node);
         if (id) oldById.set(id, t);
       }
 
@@ -188,7 +194,7 @@
       const matchedOldIds = new Set();
 
       for (const t of newTokens) {
-        const id = t.node.$extensions && t.node.$extensions["com.figma.variableId"];
+        const id = tokenId(t.node);
         const old = id ? oldById.get(id) : null;
         if (!old) {
           result.created.push(t.path);
@@ -224,7 +230,7 @@
       }
 
       for (const t of oldTokens) {
-        const id = t.node.$extensions && t.node.$extensions["com.figma.variableId"];
+        const id = tokenId(t.node);
         if (id && !matchedOldIds.has(id)) {
           result.deleted.push(t.path);
         }
@@ -258,6 +264,21 @@
 
     function collectionDir(c) {
       return state.folder + "/" + slug(c.name);
+    }
+
+    function styleDir() {
+      return state.folder + "/styles";
+    }
+
+    function styleFileName(kind) {
+      return kind.toLowerCase() + ".tokens.json";
+    }
+
+    function selectedStyleKinds() {
+      if (state.selectedStyleId === "ALL_STYLES") {
+        return STYLE_OPTIONS.filter((s) => s.id !== "ALL_STYLES").map((s) => s.id);
+      }
+      return [state.selectedStyleId];
     }
 
     const MODE_ACTIVE = "bg-neutral-900 text-white";
@@ -303,27 +324,36 @@
       const hasFolder = Boolean(state.folder);
       const exportBtn = document.querySelector('[data-action="export"]');
       const importBtn = document.querySelector('[data-action="import"]');
-      if (state.mode === "styles") {
-        exportBtn.disabled = true;
-        importBtn.disabled = true;
-        exportBtn.title = "Styles sync isn't built yet";
-        importBtn.title = "Styles sync isn't built yet";
-      } else {
-        exportBtn.disabled = !hasFolder;
-        importBtn.disabled = !hasFolder;
-        exportBtn.title = "";
-        importBtn.title = "";
-      }
+      exportBtn.disabled = !hasFolder;
+      importBtn.disabled = !hasFolder;
+      exportBtn.title = "";
+      importBtn.title = "";
     }
 
     async function refreshFileStatus() {
       const el = document.getElementById("file-status");
-      if (state.mode === "styles") {
+      if (!state.folder) {
         el.textContent = "";
         return;
       }
+
+      if (state.mode === "styles") {
+        el.textContent = "Checking…";
+        try {
+          const res = await fetch(BRIDGE + "/list-files?dir=" + encodeURIComponent(styleDir()));
+          const data = await res.json();
+          const files = data.files || [];
+          const wanted = selectedStyleKinds().map(styleFileName);
+          const found = files.filter((f) => wanted.includes(f));
+          el.textContent = found.length > 0 ? found.join(", ") : "Files not found";
+        } catch (err) {
+          el.textContent = "";
+        }
+        return;
+      }
+
       const c = selectedCollection();
-      if (!state.folder || !c) {
+      if (!c) {
         el.textContent = "";
         return;
       }
@@ -382,6 +412,27 @@
       return groups;
     }
 
+    async function importStyleGroupsFor(kinds) {
+      const dir = styleDir();
+      const listRes = await fetch(BRIDGE + "/list-files?dir=" + encodeURIComponent(dir));
+      const listData = await listRes.json();
+      const available = listData.files || [];
+
+      const groups = [];
+      for (const kind of kinds) {
+        const filename = styleFileName(kind);
+        if (!available.includes(filename)) continue;
+        const readRes = await fetch(BRIDGE + "/read-files", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dir: dir, files: [filename] }),
+        });
+        const readData = await readRes.json();
+        groups.push({ kind: kind, files: [{ filename: filename, content: readData[filename] }] });
+      }
+      return groups;
+    }
+
     document.addEventListener("click", async (e) => {
       const btn = e.target.closest("button");
       if (!btn) return;
@@ -410,6 +461,13 @@
       }
 
       if (action === "export") {
+        if (state.mode === "styles") {
+          const kinds = selectedStyleKinds();
+          const label = state.selectedStyleId === "ALL_STYLES" ? "all styles" : kinds[0].toLowerCase();
+          log("Exporting", label, "info");
+          parent.postMessage({ pluginMessage: { type: "export-styles", kinds: kinds, dir: state.folder } }, "*");
+          return;
+        }
         const c = selectedCollection();
         const label = c ? c.name : "all collections";
         log("Exporting", label, "info");
@@ -421,6 +479,41 @@
       }
 
       if (action === "import") {
+        if (state.mode === "styles") {
+          const kinds = selectedStyleKinds();
+          const label = state.selectedStyleId === "ALL_STYLES" ? "all styles" : kinds[0].toLowerCase();
+          log("Checking", label, "info");
+          try {
+            const groups = await importStyleGroupsFor(kinds);
+            if (groups.length === 0) {
+              log("Nothing to import", "no token files found", "info");
+              return;
+            }
+
+            parent.postMessage({ pluginMessage: { type: "check-import-styles", groups: groups } }, "*");
+            const missing = await waitForCheckResult();
+
+            let deleteMissing = false;
+            if (missing.length > 0) {
+              const proceed = await showConfirm(missing);
+              if (!proceed) {
+                log("Import cancelled", "", "info");
+                return;
+              }
+              deleteMissing = true;
+            }
+
+            log("Importing", label, "info");
+            parent.postMessage(
+              { pluginMessage: { type: "import-styles", groups: groups, deleteMissing: deleteMissing } },
+              "*",
+            );
+          } catch (err) {
+            log("Import failed", err.message, "error");
+          }
+          return;
+        }
+
         const isAll = state.selectedCollectionId === "ALL";
         const targets = isAll ? state.collections : state.collections.filter((c) => c.id === state.selectedCollectionId);
         if (targets.length === 0) return;

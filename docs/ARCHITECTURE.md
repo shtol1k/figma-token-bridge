@@ -211,6 +211,59 @@ have shifted between the check and the confirm) immediately before
 calling `variable.remove()` on each. Cancelling degrades to a normal
 Import — creates/updates still happen, nothing gets removed.
 
+## Styles: the same skeleton, a different domain
+
+Paint/Text/Effect/Grid styles reuse every mechanism built for Variables
+— name-path nesting, ID-first-then-name matching, the tombstone-safety
+cross-check against the live enumerable list, diff-based field sync,
+confirm-first delete-sync, even the same `ImportSummary` shape — but
+they are a genuinely different Plugin API surface
+(`figma.getLocal{Paint,Text,Effect,Grid}StylesAsync`,
+`figma.createPaintStyle()` etc., `figma.getStyleByIdAsync`), not a
+variant of Variables. Two structural differences drove separate code
+paths (`serializeStyles`/`importStyleFile` alongside
+`serializeCollectionMode`/`importFile`) instead of unifying them:
+
+- **No modes.** A Style holds one value, not one per mode — there's no
+  `modeId` axis to loop over. Each style *type* gets exactly one file
+  (`styles/paint.tokens.json`, not `styles/light.tokens.json`).
+- **No scopes, no codeSyntax.** Neither property exists on `BaseStyle`.
+  The per-field diff (Name/Value/Description) is a strict subset of
+  Variables' (Name/Value/Scope/Description/CodeSyntax) — the UI's result
+  summary shows the same five sub-lines for both regardless, since
+  Scope/CodeSyntax simply stay at 0 for a styles result rather than
+  needing a second rendering path.
+
+### Where a style's value doesn't fit DTCG cleanly
+
+Text styles map reasonably onto the DTCG `typography` composite type —
+`fontFamily`/`fontWeight`/`fontSize`/`letterSpacing`/`lineHeight` all
+have direct Figma equivalents (`fontName.family`/`fontName.style`/…).
+The properties DTCG has no slot for (`paragraphIndent`,
+`paragraphSpacing`, `listSpacing`, `textCase`, `textDecoration`,
+`leadingTrim`, `hangingPunctuation`, `hangingList`) are carried in
+`$extensions["com.figma.textStyleExtras"]` rather than dropped — losing
+them silently would mean Import could never fully restore a Text style
+Export just produced.
+
+Paint, Effect, and Grid styles don't map onto a spec composite at all:
+each can hold an *array* of layers (a Paint style stacking a gradient
+over a solid; an Effect style combining several shadows and blurs), and
+the spec's `color`/`shadow` types only describe a single one. Forcing
+these into a spec-compliant shape would mean picking one layer and
+discarding the rest — silent data loss on the very next Export. Instead
+these use Figma-specific `$type` values (`figmaPaint`/`figmaEffect`/
+`figmaGrid`) with the raw `paints`/`effects`/`layoutGrids` array
+(deep-cloned via `JSON.parse(JSON.stringify(...))` to strip Figma's
+read-only wrapper objects to plain JSON) as `$value`. A generic
+DTCG-consuming tool won't recognize these three `$type`s; this tool's
+own round-trip doesn't need it to.
+
+Text style creation needs one extra step Variables never required:
+`figma.loadFontAsync(fontName)` must resolve *before* `fontName` (or any
+other property) is set on a Text style, mirroring the same requirement
+for text nodes — skipping it throws.
+
 ## Bridge server: deliberately dumb
 
 `server/index.ts` is a single file on `node:http`, no framework, four
