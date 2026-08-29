@@ -5,14 +5,22 @@
 <!-- INLINE_CSS -->
 </head>
 <body class="m-0 p-2 font-sans text-xs text-neutral-900 bg-white">
-  <div class="flex gap-1.5 mb-1">
+  <div class="flex gap-1.5 mb-1.5">
     <button
       data-action="choose-file-folder"
-      class="shrink-0 h-8 w-8 flex items-center justify-center rounded-md border border-neutral-300 bg-white hover:bg-neutral-50 cursor-pointer text-neutral-600"
+      class="flex-1 min-w-0 h-8 flex items-center gap-1.5 px-2.5 rounded-md border border-neutral-300 bg-white hover:bg-neutral-50 cursor-pointer text-neutral-700"
       title="Select tokens folder"
     >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+      <svg class="shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+      <span id="folder-name" class="truncate text-[11px]">(not set)</span>
     </button>
+    <div class="shrink-0 h-8 flex rounded-md border border-neutral-300 overflow-hidden text-[11px]">
+      <button id="mode-variables" class="px-3 h-full cursor-pointer">Variables</button>
+      <button id="mode-styles" class="px-3 h-full cursor-pointer">Styles</button>
+    </div>
+  </div>
+
+  <div class="flex gap-1.5 mb-1.5">
     <div class="relative flex-1 min-w-0">
       <select
         id="collection-select"
@@ -85,10 +93,20 @@
 
   <script>
     const BRIDGE = "http://localhost:8934";
+    const STYLE_OPTIONS = [
+      { id: "ALL_STYLES", name: "All Styles" },
+      { id: "TEXT", name: "Text styles" },
+      { id: "PAINT", name: "Color styles" },
+      { id: "EFFECT", name: "Effect styles" },
+      { id: "GRID", name: "Layout guide styles" },
+    ];
+
     const state = {
+      mode: "variables",
       collections: [],
       folder: null,
       selectedCollectionId: "ALL",
+      selectedStyleId: "ALL_STYLES",
     };
 
     const ICONS = {
@@ -242,28 +260,68 @@
       return state.folder + "/" + slug(c.name);
     }
 
+    const MODE_ACTIVE = "bg-neutral-900 text-white";
+    const MODE_INACTIVE = "bg-white text-neutral-600 hover:bg-neutral-50";
+
     function render() {
       const folderBtn = document.querySelector('[data-action="choose-file-folder"]');
       folderBtn.title = state.folder || "Select tokens folder";
+      const parts = (state.folder || "").split("/").filter(Boolean);
+      document.getElementById("folder-name").textContent =
+        parts.length > 0 ? parts[parts.length - 1] : "Select folder…";
+
+      const variablesBtn = document.getElementById("mode-variables");
+      const stylesBtn = document.getElementById("mode-styles");
+      variablesBtn.className =
+        "px-3 h-full cursor-pointer " + (state.mode === "variables" ? MODE_ACTIVE : MODE_INACTIVE);
+      stylesBtn.className =
+        "px-3 h-full cursor-pointer " + (state.mode === "styles" ? MODE_ACTIVE : MODE_INACTIVE);
 
       const select = document.getElementById("collection-select");
-      const currentValue = state.selectedCollectionId;
-      select.innerHTML = '<option value="ALL">All Collections</option>';
-      for (const c of state.collections) {
-        const opt = document.createElement("option");
-        opt.value = c.id;
-        opt.textContent = c.name;
-        select.appendChild(opt);
+      if (state.mode === "variables") {
+        const currentValue = state.selectedCollectionId;
+        select.innerHTML = '<option value="ALL">All Collections</option>';
+        for (const c of state.collections) {
+          const opt = document.createElement("option");
+          opt.value = c.id;
+          opt.textContent = c.name;
+          select.appendChild(opt);
+        }
+        select.value = currentValue;
+      } else {
+        const currentValue = state.selectedStyleId;
+        select.innerHTML = "";
+        for (const s of STYLE_OPTIONS) {
+          const opt = document.createElement("option");
+          opt.value = s.id;
+          opt.textContent = s.name;
+          select.appendChild(opt);
+        }
+        select.value = currentValue;
       }
-      select.value = currentValue;
 
       const hasFolder = Boolean(state.folder);
-      document.querySelector('[data-action="export"]').disabled = !hasFolder;
-      document.querySelector('[data-action="import"]').disabled = !hasFolder;
+      const exportBtn = document.querySelector('[data-action="export"]');
+      const importBtn = document.querySelector('[data-action="import"]');
+      if (state.mode === "styles") {
+        exportBtn.disabled = true;
+        importBtn.disabled = true;
+        exportBtn.title = "Styles sync isn't built yet";
+        importBtn.title = "Styles sync isn't built yet";
+      } else {
+        exportBtn.disabled = !hasFolder;
+        importBtn.disabled = !hasFolder;
+        exportBtn.title = "";
+        importBtn.title = "";
+      }
     }
 
     async function refreshFileStatus() {
       const el = document.getElementById("file-status");
+      if (state.mode === "styles") {
+        el.textContent = "";
+        return;
+      }
       const c = selectedCollection();
       if (!state.folder || !c) {
         el.textContent = "";
@@ -281,7 +339,23 @@
     }
 
     document.getElementById("collection-select").addEventListener("change", (e) => {
-      state.selectedCollectionId = e.target.value;
+      if (state.mode === "variables") {
+        state.selectedCollectionId = e.target.value;
+      } else {
+        state.selectedStyleId = e.target.value;
+      }
+      render();
+      refreshFileStatus();
+    });
+
+    document.getElementById("mode-variables").addEventListener("click", () => {
+      state.mode = "variables";
+      render();
+      refreshFileStatus();
+    });
+
+    document.getElementById("mode-styles").addEventListener("click", () => {
+      state.mode = "styles";
       render();
       refreshFileStatus();
     });

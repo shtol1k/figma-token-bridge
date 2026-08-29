@@ -81,12 +81,17 @@ does nothing until the plugin talks to it.
 
 ### 3. Set the tokens folder (once per Figma file)
 
-Click the folder icon at the left of the panel's top row. A native
-folder picker opens (via the bridge server) — choose the folder where
-token JSON should live, e.g. a `docs/tokens/` directory in your app's
-repo. This is remembered per Figma file (keyed by `figma.fileKey` in the
-plugin's `clientStorage`), so different design files can point at
-different folders.
+Click the folder button spanning the top row (it shows the folder's
+short name once set, full path on hover). A native folder picker opens
+(via the bridge server) — choose the folder where token JSON should
+live, e.g. a `docs/tokens/` directory in your app's repo. This is
+remembered per Figma file (keyed by `figma.fileKey` in the plugin's
+`clientStorage`), so different design files can point at different
+folders.
+
+Next to it, a **Variables / Styles** switch picks what the dropdown
+below lists. Styles sync isn't implemented yet — the switch is there,
+but Export/Import stay disabled while "Styles" is selected.
 
 ### 4. Pick a collection
 
