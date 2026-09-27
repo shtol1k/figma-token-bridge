@@ -19,6 +19,46 @@ interface AliasInfo {
   targetVariableSetName: string;
 }
 
+/**
+ * A COLOR variable value that aliases another color variable *and* carries
+ * an opacity — Figma's "alias + opacity". Not in @figma/plugin-typings
+ * (1.134), so it's typed here. `opacity` is on Figma's 0–100 scale (48 means
+ * 48%), either a literal or an alias to a FLOAT variable. Observed resolution
+ * (via `resolveForConsumer`): when the aliased color is opaque, the resolved
+ * alpha is `opacity / 100`; when the aliased color is itself translucent, the
+ * opacity is ignored and the target's own alpha wins.
+ */
+interface VariableAliasWithOpacity {
+  color: VariableAlias;
+  opacity: number | VariableAlias;
+}
+
+/** What `variable.valuesByMode[modeId]` can actually hold at runtime. */
+type RawVariableValue = VariableValue | VariableAliasWithOpacity;
+
+// The bundled typings only accept VariableValue; the API itself accepts the
+// alias+opacity shape too (verified with setValueForMode on a live file).
+interface Variable {
+  setValueForMode(modeId: string, newValue: VariableAliasWithOpacity): void;
+}
+
+/** `com.figma.aliasWithOpacity` — see README "Alias + opacity". */
+interface AliasWithOpacityInfo {
+  color: AliasInfo & { stale?: true };
+  opacity: { value: number } & Partial<AliasInfo> & { stale?: true };
+}
+
+/** Per-export context: which variable IDs are really alive, plus user-facing notes. */
+interface ExportContext {
+  liveIds: Set<string>;
+  notes: string[];
+}
+
+async function newExportContext(): Promise<ExportContext> {
+  const all = await figma.variables.getLocalVariablesAsync();
+  return { liveIds: new Set(all.map((v) => v.id)), notes: [] };
+}
+
 const STORAGE_KEY = "folderByFile";
 
 function currentFileKey(): string {
@@ -53,8 +93,26 @@ async function sendCollections(): Promise<void> {
   figma.ui.postMessage({ type: "collections", collections: summaries, folder });
 }
 
-function isAlias(value: VariableValue): value is VariableAlias {
+function isAlias(value: unknown): value is VariableAlias {
   return typeof value === "object" && value !== null && (value as VariableAlias).type === "VARIABLE_ALIAS";
+}
+
+function isAliasWithOpacity(value: unknown): value is VariableAliasWithOpacity {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as VariableAliasWithOpacity;
+  return isAlias(v.color) && (typeof v.opacity === "number" || isAlias(v.opacity));
+}
+
+function rawValue(variable: Variable, modeId: string): RawVariableValue | undefined {
+  return variable.valuesByMode[modeId] as RawVariableValue | undefined;
+}
+
+function setRawValueForMode(variable: Variable, modeId: string, value: RawVariableValue): void {
+  if (isAliasWithOpacity(value)) {
+    variable.setValueForMode(modeId, value);
+  } else {
+    variable.setValueForMode(modeId, value);
+  }
 }
 
 function toHex2(n: number): string {
@@ -88,46 +146,143 @@ function formatValue(
 }
 
 /**
- * Recursively resolves a variable's value for a given mode, following
- * VARIABLE_ALIAS chains to a concrete value. Records only the immediate
- * (first-hop) alias target in `alias`, matching the shape already present
- * in docs/tokens/theme/*.tokens.json — deeper chains still resolve `value`
- * correctly, they just aren't listed hop-by-hop.
+ * `getVariableByIdAsync` can still return a deleted variable (a tombstone —
+ * see importFile). A target is only trusted as live if it's in the local
+ * enumeration or comes from a library (`remote`). A tombstone is still
+ * returned so callers can use its last-known name/value, flagged `stale`.
  */
-async function resolveVariableValue(
+async function lookupVariable(
+  id: string,
+  ctx: ExportContext,
+): Promise<{ variable: Variable | null; stale: boolean }> {
+  const variable = await figma.variables.getVariableByIdAsync(id);
+  const live = variable !== null && (variable.remote || ctx.liveIds.has(variable.id));
+  return { variable, stale: !live };
+}
+
+async function aliasInfo(target: Variable): Promise<AliasInfo> {
+  const targetCollection = await figma.variables.getVariableCollectionByIdAsync(target.variableCollectionId);
+  return {
+    targetVariableId: target.id,
+    targetVariableName: target.name,
+    targetVariableSetId: target.variableCollectionId,
+    targetVariableSetName: targetCollection ? targetCollection.name : "",
+  };
+}
+
+/** A target in another collection may not have `modeId`; fall back to its first mode. */
+function modeFor(variable: Variable, modeId: string): string {
+  return variable.valuesByMode[modeId] !== undefined ? modeId : Object.keys(variable.valuesByMode)[0];
+}
+
+/** Figma's observed rule — see VariableAliasWithOpacity. */
+function applyAliasOpacity(color: RGB | RGBA, opacity: number): RGBA {
+  const targetAlpha = "a" in color ? color.a : 1;
+  return { r: color.r, g: color.g, b: color.b, a: targetAlpha < 1 ? targetAlpha : opacity / 100 };
+}
+
+/**
+ * Follows plain-alias and alias+opacity chains to a concrete value, so a
+ * plain alias pointing at an alias+opacity variable still flattens
+ * correctly. Tombstoned targets resolve to their last-known value (Figma
+ * keeps rendering it); the caller is responsible for flagging staleness.
+ * Returns null when nothing concrete can be reached (target gone entirely,
+ * a cycle, or a type mismatch) — never a half-built value.
+ */
+async function resolveConcrete(
   variable: Variable,
   modeId: string,
-): Promise<{ value: VariableValue; alias: AliasInfo | null }> {
-  const raw = variable.valuesByMode[modeId];
+  seen: Set<string> = new Set(),
+): Promise<VariableValue | null> {
+  if (seen.has(variable.id)) return null;
+  const chain = new Set(seen).add(variable.id);
+  const raw = rawValue(variable, modeId);
+  if (raw === undefined) return null;
 
-  if (!isAlias(raw)) {
-    return { value: raw, alias: null };
+  if (isAliasWithOpacity(raw)) {
+    const color = await resolveAliasTarget(raw.color, modeId, chain);
+    if (color === null || typeof color !== "object" || !("r" in color)) return null;
+    const opacity = typeof raw.opacity === "number" ? raw.opacity : await resolveAliasTarget(raw.opacity, modeId, chain);
+    if (typeof opacity !== "number") return null;
+    return applyAliasOpacity(color, opacity);
+  }
+  if (isAlias(raw)) {
+    return resolveAliasTarget(raw, modeId, chain);
+  }
+  return raw;
+}
+
+async function resolveAliasTarget(
+  alias: VariableAlias,
+  modeId: string,
+  seen: Set<string>,
+): Promise<VariableValue | null> {
+  const target = await figma.variables.getVariableByIdAsync(alias.id);
+  if (!target) return null;
+  return resolveConcrete(target, modeFor(target, modeId), seen);
+}
+
+/**
+ * The `$value` plus the reference-describing `$extensions` for one variable
+ * in one mode. Plain values and live plain aliases produce exactly the
+ * pre-existing shape (`com.figma.aliasData` = first hop, `$value` = fully
+ * resolved). Returns null if no concrete value exists at all; the caller
+ * omits the token and says so.
+ */
+async function serializeVariableValue(
+  v: Variable,
+  modeId: string,
+  ctx: ExportContext,
+): Promise<{ type: string; value: unknown; extensions: Record<string, unknown> } | null> {
+  const raw = rawValue(v, modeId);
+  const resolved = await resolveConcrete(v, modeId);
+  if (raw === undefined || resolved === null) return null;
+
+  const extensions: Record<string, unknown> = {};
+
+  if (isAliasWithOpacity(raw)) {
+    const color = await lookupVariable(raw.color.id, ctx);
+    // resolveConcrete succeeded, so both targets exist (possibly as tombstones).
+    const info: AliasWithOpacityInfo = {
+      color: await aliasInfo(color.variable!),
+      opacity: { value: 0 },
+    };
+    if (color.stale) info.color.stale = true;
+
+    if (typeof raw.opacity === "number") {
+      info.opacity = { value: raw.opacity };
+    } else {
+      const op = await lookupVariable(raw.opacity.id, ctx);
+      const opValue = await resolveConcrete(op.variable!, modeFor(op.variable!, modeId));
+      info.opacity = { value: opValue as number, ...(await aliasInfo(op.variable!)) };
+      if (op.stale) info.opacity.stale = true;
+    }
+    extensions["com.figma.aliasWithOpacity"] = info;
+
+    const targetColor = await resolveConcrete(color.variable!, modeFor(color.variable!, modeId));
+    if (targetColor && typeof targetColor === "object" && "a" in targetColor && targetColor.a < 1) {
+      ctx.notes.push(
+        `"${v.name}": aliases translucent "${color.variable!.name}" — Figma ignores the opacity (${info.opacity.value}) in that case; exported alpha is the target's.`,
+      );
+    }
+    if (info.color.stale || info.opacity.stale) {
+      ctx.notes.push(`"${v.name}": alias + opacity points at a deleted variable — exported its last-known value, flagged stale.`);
+    }
+  } else if (isAlias(raw)) {
+    const target = await lookupVariable(raw.id, ctx);
+    if (target.stale) {
+      extensions["com.figma.staleAlias"] = {
+        targetVariableId: raw.id,
+        ...(target.variable ? { targetVariableName: target.variable.name } : {}),
+      };
+      ctx.notes.push(`"${v.name}": alias target was deleted — exported its last-known value, flagged stale.`);
+    } else {
+      extensions["com.figma.aliasData"] = await aliasInfo(target.variable!);
+    }
   }
 
-  const target = await figma.variables.getVariableByIdAsync(raw.id);
-  if (!target) {
-    // Stale alias (target deleted) — surface the raw pointer rather than crash.
-    return { value: raw, alias: null };
-  }
-
-  const targetCollection = await figma.variables.getVariableCollectionByIdAsync(
-    target.variableCollectionId,
-  );
-  const targetModeId = target.valuesByMode[modeId] !== undefined
-    ? modeId
-    : Object.keys(target.valuesByMode)[0];
-
-  const resolved = await resolveVariableValue(target, targetModeId);
-
-  return {
-    value: resolved.value,
-    alias: {
-      targetVariableId: target.id,
-      targetVariableName: target.name,
-      targetVariableSetId: target.variableCollectionId,
-      targetVariableSetName: targetCollection ? targetCollection.name : "",
-    },
-  };
+  const { type, value } = formatValue(v.resolvedType, resolved);
+  return { type, value, extensions };
 }
 
 function setPath(root: Record<string, unknown>, segments: string[], leaf: unknown): void {
@@ -145,14 +300,20 @@ function setPath(root: Record<string, unknown>, segments: string[], leaf: unknow
 async function serializeCollectionMode(
   collection: VariableCollection,
   modeId: string,
+  ctx: ExportContext,
 ): Promise<Record<string, unknown>> {
   const allVars = await figma.variables.getLocalVariablesAsync();
   const vars = allVars.filter((v) => v.variableCollectionId === collection.id);
   const root: Record<string, unknown> = {};
 
   for (const v of vars) {
-    const { value, alias } = await resolveVariableValue(v, modeId);
-    const { type, value: formattedValue } = formatValue(v.resolvedType, value);
+    const serialized = await serializeVariableValue(v, modeId, ctx);
+    if (!serialized) {
+      ctx.notes.push(
+        `"${v.name}": no resolvable value in this mode (alias target gone) — left out of the file. Cancel the delete prompt on the next Import.`,
+      );
+      continue;
+    }
 
     const extensions: Record<string, unknown> = {
       "com.figma.variableId": v.id,
@@ -161,11 +322,9 @@ async function serializeCollectionMode(
     if (v.codeSyntax && Object.keys(v.codeSyntax).length > 0) {
       extensions["com.figma.codeSyntax"] = { ...v.codeSyntax };
     }
-    if (alias) {
-      extensions["com.figma.aliasData"] = alias;
-    }
+    Object.assign(extensions, serialized.extensions);
 
-    const leaf: Record<string, unknown> = { $type: type, $value: formattedValue };
+    const leaf: Record<string, unknown> = { $type: serialized.type, $value: serialized.value };
     if (v.description) {
       leaf.$description = v.description;
     }
@@ -175,6 +334,26 @@ async function serializeCollectionMode(
   }
 
   return root;
+}
+
+/**
+ * Paths of every non-finite number (and any "NaN" string, e.g. a hex built
+ * from one) in an export tree. Export refuses to write a file with any —
+ * JSON.stringify would silently turn NaN into null.
+ */
+function findNonFinite(node: unknown, path: string, out: string[]): string[] {
+  if (typeof node === "number") {
+    if (!Number.isFinite(node)) out.push(path);
+  } else if (typeof node === "string") {
+    if (/^#/.test(node) && /nan/i.test(node)) out.push(path);
+  } else if (Array.isArray(node)) {
+    node.forEach((child, i) => findNonFinite(child, `${path}[${i}]`, out));
+  } else if (typeof node === "object" && node !== null) {
+    for (const key of Object.keys(node)) {
+      findNonFinite((node as Record<string, unknown>)[key], path ? `${path}/${key}` : key, out);
+    }
+  }
+  return out;
 }
 
 interface ImportSummary {
@@ -190,7 +369,19 @@ interface ImportSummary {
   notes: string[];
 }
 
-function valuesEqual(a: VariableValue, b: VariableValue): boolean {
+function valuesEqual(a: RawVariableValue, b: RawVariableValue): boolean {
+  const withOpacityA = isAliasWithOpacity(a);
+  const withOpacityB = isAliasWithOpacity(b);
+  if (withOpacityA || withOpacityB) {
+    if (!withOpacityA || !withOpacityB) return false;
+    const oa = a.opacity;
+    const ob = b.opacity;
+    const opacityEqual =
+      typeof oa === "number" && typeof ob === "number"
+        ? Math.abs(oa - ob) < 1e-4
+        : isAlias(oa) && isAlias(ob) && oa.id === ob.id;
+    return a.color.id === b.color.id && opacityEqual;
+  }
   const aliasA = isAlias(a);
   const aliasB = isAlias(b);
   if (aliasA || aliasB) {
@@ -216,16 +407,23 @@ function typeToResolvedType(dtcgType: string): VariableResolvedDataType {
   return "STRING";
 }
 
-function toFigmaValue(dtcgType: string, dtcgValue: any): VariableValue {
+function isFiniteNumber(n: unknown): n is number {
+  return typeof n === "number" && Number.isFinite(n);
+}
+
+/** Returns null for anything that isn't a well-formed value of `dtcgType` — never a partial one. */
+function toFigmaValue(dtcgType: string, dtcgValue: any): VariableValue | null {
   if (dtcgType === "color") {
-    return {
-      r: dtcgValue.components[0],
-      g: dtcgValue.components[1],
-      b: dtcgValue.components[2],
-      a: dtcgValue.alpha,
-    } as RGBA;
+    const c = dtcgValue?.components;
+    const alpha = dtcgValue?.alpha ?? 1;
+    if (!Array.isArray(c) || c.length !== 3 || !c.every(isFiniteNumber) || !isFiniteNumber(alpha)) {
+      return null;
+    }
+    return { r: c[0], g: c[1], b: c[2], a: alpha };
   }
-  return dtcgValue as VariableValue;
+  if (dtcgType === "number") return isFiniteNumber(dtcgValue) ? dtcgValue : null;
+  if (dtcgType === "boolean") return typeof dtcgValue === "boolean" ? dtcgValue : null;
+  return typeof dtcgValue === "string" ? dtcgValue : null;
 }
 
 function flattenTokens(
@@ -293,12 +491,93 @@ async function importFile(
   const allLocalVars = await figma.variables.getLocalVariablesAsync();
   const liveIds = new Set(allLocalVars.map((v) => v.id));
   const collectionVars = allLocalVars.filter((v) => v.variableCollectionId === collection.id);
+  const collections = await figma.variables.getLocalVariableCollectionsAsync();
 
   function findByName(name: string): Variable | null {
     return collectionVars.find((v) => v.name === name) ?? null;
   }
   function findAnyByName(name: string): Variable | null {
     return allLocalVars.find((v) => v.name === name) ?? null;
+  }
+
+  async function findLiveTarget(ref: any, resolvedType: VariableResolvedDataType): Promise<Variable | null> {
+    let target: Variable | null = null;
+    if (ref.targetVariableId && liveIds.has(ref.targetVariableId)) {
+      target = await figma.variables.getVariableByIdAsync(ref.targetVariableId);
+    }
+    if (!target && ref.targetVariableName) {
+      // Names repeat across collections ("8" in opacity vs spacing), so prefer the recorded one.
+      const set = collections.find((c) => c.name === ref.targetVariableSetName);
+      target =
+        allLocalVars.find((v) => v.name === ref.targetVariableName && (!set || v.variableCollectionId === set.id)) ??
+        null;
+    }
+    return target && target.resolvedType === resolvedType ? target : null;
+  }
+
+  /** The value to write for one token, or null (with a note naming the token) to leave it alone. */
+  async function desiredValueFor(name: string, node: any, extensions: any): Promise<RawVariableValue | null> {
+    const staleAlias = extensions["com.figma.staleAlias"];
+    if (staleAlias) {
+      summary.notes.push(
+        `"${name}": skipped — exported as a stale alias (target ${staleAlias.targetVariableName ?? staleAlias.targetVariableId} was deleted); Figma left as is.`,
+      );
+      return null;
+    }
+
+    const withOpacity = extensions["com.figma.aliasWithOpacity"];
+    if (withOpacity) {
+      const ref = withOpacity.color ?? {};
+      const op = withOpacity.opacity ?? {};
+      if (ref.stale || op.stale) {
+        summary.notes.push(`"${name}": skipped — alias + opacity was exported with a deleted target; Figma left as is.`);
+        return null;
+      }
+      const colorTarget = await findLiveTarget(ref, "COLOR");
+      if (!colorTarget) {
+        summary.notes.push(`"${name}": skipped — alias + opacity color target "${ref.targetVariableName}" not found.`);
+        return null;
+      }
+      let opacity: number | VariableAlias;
+      if (op.targetVariableId || op.targetVariableName) {
+        const opacityTarget = await findLiveTarget(op, "FLOAT");
+        if (!opacityTarget) {
+          summary.notes.push(`"${name}": skipped — alias + opacity number target "${op.targetVariableName}" not found.`);
+          return null;
+        }
+        opacity = { type: "VARIABLE_ALIAS", id: opacityTarget.id };
+      } else if (isFiniteNumber(op.value) && op.value >= 0 && op.value <= 100) {
+        opacity = op.value;
+      } else {
+        summary.notes.push(`"${name}": skipped — alias + opacity has invalid opacity ${JSON.stringify(op.value)} (want 0–100).`);
+        return null;
+      }
+      return { color: { type: "VARIABLE_ALIAS", id: colorTarget.id }, opacity };
+    }
+
+    const aliasData = extensions["com.figma.aliasData"];
+    if (aliasData) {
+      let target =
+        aliasData.targetVariableId && liveIds.has(aliasData.targetVariableId)
+          ? await figma.variables.getVariableByIdAsync(aliasData.targetVariableId)
+          : null;
+      if (!target && aliasData.targetVariableName) {
+        target = findAnyByName(aliasData.targetVariableName);
+      }
+      if (target) {
+        return { type: "VARIABLE_ALIAS", id: target.id };
+      }
+      summary.notes.push(
+        `Alias target not found for "${name}" (wanted "${aliasData.targetVariableName}") — value left unset.`,
+      );
+      return null;
+    }
+
+    const value = toFigmaValue(node.$type, node.$value);
+    if (value === null) {
+      summary.notes.push(`"${name}": skipped — malformed ${node.$type} value ${JSON.stringify(node.$value)}.`);
+    }
+    return value;
   }
 
   for (const { path: tokenPath, node } of tokens) {
@@ -327,6 +606,15 @@ async function importFile(
       }
     }
 
+    // Decided before creating anything: a token whose value can't be
+    // written faithfully is skipped (with a note naming it), never created
+    // empty or written half-resolved.
+    const desiredValue = await desiredValueFor(name, node, extensions);
+    if (desiredValue === null && !variable) {
+      summary.notes.push(`"${name}": not created — no value could be written (see above).`);
+      continue;
+    }
+
     let isNew = false;
     let tokenChanged = false;
     if (!variable) {
@@ -342,31 +630,11 @@ async function importFile(
       tokenChanged = true;
     }
 
-    const aliasData = extensions["com.figma.aliasData"];
-    let desiredValue: VariableValue | null = null;
-    if (aliasData) {
-      let target =
-        aliasData.targetVariableId && liveIds.has(aliasData.targetVariableId)
-          ? await figma.variables.getVariableByIdAsync(aliasData.targetVariableId)
-          : null;
-      if (!target && aliasData.targetVariableName) {
-        target = findAnyByName(aliasData.targetVariableName);
-      }
-      if (target) {
-        desiredValue = { type: "VARIABLE_ALIAS", id: target.id };
-      } else {
-        summary.notes.push(
-          `Alias target not found for "${name}" (wanted "${aliasData.targetVariableName}") — value left unset.`,
-        );
-      }
-    } else {
-      desiredValue = toFigmaValue(node.$type, node.$value);
-    }
     if (desiredValue !== null) {
-      const currentValue = variable.valuesByMode[modeId];
+      const currentValue = rawValue(variable, modeId);
       const unchanged = !isNew && currentValue !== undefined && valuesEqual(currentValue, desiredValue);
       if (!unchanged) {
-        variable.setValueForMode(modeId, desiredValue);
+        setRawValueForMode(variable, modeId, desiredValue);
         if (!isNew) {
           summary.valueChanges++;
           tokenChanged = true;
@@ -478,7 +746,96 @@ function serializeStyleValue(kind: StyleKind, style: BaseStyle): { type: string;
   };
 }
 
-async function serializeStyles(kind: StyleKind): Promise<Record<string, unknown>> {
+/** The part of a Paint / Effect / LayoutGrid that can carry variable bindings. */
+interface BindableLayer {
+  readonly boundVariables?: { readonly [field: string]: VariableAlias | undefined };
+  readonly gradientStops?: ReadonlyArray<{ readonly boundVariables?: { readonly color?: VariableAlias } }>;
+}
+
+/** One entry of `com.figma.boundVariables` — see README "Styles bound to variables". */
+interface StyleBinding {
+  layer: number;
+  field: string;
+  variableId: string;
+  variableName: string;
+  variableSetId: string;
+  variableSetName: string;
+  stale?: true;
+  valuesByMode: { [modeName: string]: unknown };
+}
+
+function styleLayers(kind: StyleKind, style: BaseStyle): ReadonlyArray<object> {
+  if (kind === "PAINT") return (style as PaintStyle).paints;
+  if (kind === "EFFECT") return (style as EffectStyle).effects;
+  if (kind === "GRID") return (style as GridStyle).layoutGrids;
+  return [];
+}
+
+/** Every `{layer, field, alias}` binding on a list of style layers, gradient stops included. */
+function layerBindings(layers: ReadonlyArray<object>): { layer: number; field: string; alias: VariableAlias }[] {
+  const out: { layer: number; field: string; alias: VariableAlias }[] = [];
+  layers.forEach((l, i) => {
+    const layer = l as BindableLayer;
+    for (const field of Object.keys(layer.boundVariables ?? {})) {
+      const alias = layer.boundVariables![field];
+      if (isAlias(alias)) out.push({ layer: i, field, alias });
+    }
+    (layer.gradientStops ?? []).forEach((stop, j) => {
+      const alias = stop.boundVariables?.color;
+      if (isAlias(alias)) out.push({ layer: i, field: `gradientStops.${j}.color`, alias });
+    });
+  });
+  return out;
+}
+
+/**
+ * A style has no modes, but the variables bound to its layers do — so for
+ * each binding, record the variable's name and its resolved value in every
+ * mode of the variable's own collection. The raw `$value` array only holds
+ * Figma's snapshot of the default mode.
+ */
+async function serializeStyleBindings(
+  styleName: string,
+  layers: ReadonlyArray<object>,
+  ctx: ExportContext,
+): Promise<StyleBinding[]> {
+  const out: StyleBinding[] = [];
+  for (const { layer, field, alias } of layerBindings(layers)) {
+    const { variable, stale } = await lookupVariable(alias.id, ctx);
+    if (!variable) {
+      ctx.notes.push(`"${styleName}": layer ${layer} ${field} is bound to a variable that no longer exists (${alias.id}).`);
+      out.push({ layer, field, variableId: alias.id, variableName: "", variableSetId: "", variableSetName: "", stale: true, valuesByMode: {} });
+      continue;
+    }
+    const info = await aliasInfo(variable);
+    const binding: StyleBinding = {
+      layer,
+      field,
+      variableId: info.targetVariableId,
+      variableName: info.targetVariableName,
+      variableSetId: info.targetVariableSetId,
+      variableSetName: info.targetVariableSetName,
+      valuesByMode: {},
+    };
+    if (stale) {
+      binding.stale = true;
+      ctx.notes.push(`"${styleName}": layer ${layer} ${field} is bound to deleted variable "${variable.name}".`);
+    }
+    const collection = await figma.variables.getVariableCollectionByIdAsync(variable.variableCollectionId);
+    for (const mode of collection ? collection.modes : []) {
+      const resolved = await resolveConcrete(variable, mode.modeId);
+      if (resolved === null) {
+        ctx.notes.push(`"${styleName}": "${variable.name}" has no resolvable value in mode "${mode.name}".`);
+        continue;
+      }
+      binding.valuesByMode[mode.name] = formatValue(variable.resolvedType, resolved).value;
+    }
+    out.push(binding);
+  }
+  return out;
+}
+
+async function serializeStyles(kind: StyleKind, ctx: ExportContext): Promise<Record<string, unknown>> {
   const styles = await getLocalStyles(kind);
   const root: Record<string, unknown> = {};
 
@@ -486,6 +843,8 @@ async function serializeStyles(kind: StyleKind): Promise<Record<string, unknown>
     const { type, value, extras } = serializeStyleValue(kind, s);
     const extensions: Record<string, unknown> = { "com.figma.styleId": s.id };
     if (extras) extensions["com.figma.textStyleExtras"] = extras;
+    const bindings = await serializeStyleBindings(s.name, styleLayers(kind, s), ctx);
+    if (bindings.length > 0) extensions["com.figma.boundVariables"] = bindings;
 
     const leaf: Record<string, unknown> = { $type: type, $value: value };
     if (s.description) leaf.$description = s.description;
@@ -526,6 +885,24 @@ async function importStyleFile(
   const tokens = flattenTokens(content);
   const allStyles = await getLocalStyles(kind);
   const liveIds = new Set(allStyles.map((s) => s.id));
+  const liveVariableIds = new Set((await figma.variables.getLocalVariablesAsync()).map((v) => v.id));
+
+  /**
+   * A layer array is only written if it's well-formed and every variable it
+   * binds still exists — assigning a binding to a deleted variable would
+   * leave the style pointing at a tombstone. Returns the reason to skip.
+   */
+  async function layerArrayProblem(value: unknown): Promise<string | null> {
+    if (!Array.isArray(value)) return "value is not a layer array";
+    const bad = findNonFinite(value, "", []);
+    if (bad.length > 0) return `non-finite number at ${bad.join(", ")}`;
+    for (const { layer, field, alias } of layerBindings(value)) {
+      if (liveVariableIds.has(alias.id)) continue;
+      const v = await figma.variables.getVariableByIdAsync(alias.id);
+      if (!v || !v.remote) return `layer ${layer} ${field} is bound to missing variable ${alias.id}`;
+    }
+    return null;
+  }
 
   for (const { path: tokenPath, node } of tokens) {
     const name = tokenPath.join("/");
@@ -550,6 +927,12 @@ async function importStyleFile(
           );
         }
       }
+    }
+
+    const valueProblem = kind === "TEXT" ? null : await layerArrayProblem(node.$value);
+    if (valueProblem) {
+      summary.notes.push(`"${name}": value skipped — ${valueProblem}.${style ? "" : " Style not created."}`);
+      if (!style) continue;
     }
 
     let isNew = false;
@@ -598,6 +981,8 @@ async function importStyleFile(
         summary.valueChanges++;
         tokenChanged = true;
       }
+    } else if (valueProblem) {
+      // Reported above; leave the existing layers untouched.
     } else if (kind === "PAINT") {
       const p = style as PaintStyle;
       const desired = node.$value as Paint[];
@@ -671,8 +1056,25 @@ function summaryToMessage(summary: ImportSummary) {
     scopeChanges: summary.scopeChanges,
     descriptionChanges: summary.descriptionChanges,
     codeSyntaxChanges: summary.codeSyntaxChanges,
-    notes: summary.notes,
+    notes: Array.from(new Set(summary.notes)), // one token appears in several mode files
   };
+}
+
+/**
+ * Hands export files to the UI for writing — unless any of them contains a
+ * non-finite number, in which case nothing is written at all: a NaN in a
+ * token file is a bug to fix, not a value to ship.
+ */
+function postExport(dir: string, files: { relativePath: string; content: unknown }[], ctx: ExportContext): void {
+  const bad: string[] = [];
+  for (const f of files) {
+    for (const path of findNonFinite(f.content, "", [])) bad.push(`${f.relativePath}: ${path}`);
+  }
+  if (bad.length > 0) {
+    figma.ui.postMessage({ type: "export-error", problems: bad });
+    return;
+  }
+  figma.ui.postMessage({ type: "do-export", dir, files, notes: Array.from(new Set(ctx.notes)) });
 }
 
 figma.ui.onmessage = async (msg: any) => {
@@ -698,10 +1100,11 @@ figma.ui.onmessage = async (msg: any) => {
       msg.collectionId === "ALL" ? collections : collections.filter((c) => c.id === msg.collectionId);
     if (targets.length === 0) return;
 
+    const ctx = await newExportContext();
     const files: { relativePath: string; content: unknown }[] = [];
     for (const target of targets) {
       for (const mode of target.modes) {
-        const tree = await serializeCollectionMode(target, mode.modeId);
+        const tree = await serializeCollectionMode(target, mode.modeId, ctx);
         files.push({
           relativePath: `${target.name.toLowerCase()}/${mode.name.toLowerCase()}.tokens.json`,
           content: tree,
@@ -709,7 +1112,7 @@ figma.ui.onmessage = async (msg: any) => {
       }
     }
 
-    figma.ui.postMessage({ type: "do-export", dir: msg.dir, files });
+    postExport(msg.dir, files, ctx);
     return;
   }
 
@@ -787,7 +1190,7 @@ figma.ui.onmessage = async (msg: any) => {
         scopeChanges: summary.scopeChanges,
         descriptionChanges: summary.descriptionChanges,
         codeSyntaxChanges: summary.codeSyntaxChanges,
-        notes: summary.notes,
+        notes: Array.from(new Set(summary.notes)),
       },
     });
     return;
@@ -795,12 +1198,13 @@ figma.ui.onmessage = async (msg: any) => {
 
   if (msg.type === "export-styles") {
     const kinds = msg.kinds as StyleKind[];
+    const ctx = await newExportContext();
     const files: { relativePath: string; content: unknown }[] = [];
     for (const kind of kinds) {
-      const tree = await serializeStyles(kind);
+      const tree = await serializeStyles(kind, ctx);
       files.push({ relativePath: `styles/${kind.toLowerCase()}.tokens.json`, content: tree });
     }
-    figma.ui.postMessage({ type: "do-export", dir: msg.dir, files });
+    postExport(msg.dir, files, ctx);
     return;
   }
 

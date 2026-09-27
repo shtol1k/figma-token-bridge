@@ -153,8 +153,10 @@ file(s):
 - If the ID is missing or stale (target deleted since the last Export),
   it falls back to matching by name, and creates a brand-new Figma
   variable if nothing matches at all.
-- `com.figma.codeSyntax` and alias bindings (`com.figma.aliasData`) are
-  written back too, not just the raw value.
+- `com.figma.codeSyntax` and alias bindings (`com.figma.aliasData`,
+  `com.figma.aliasWithOpacity`) are written back too, not just the raw
+  value. Tokens that can't be written faithfully (stale alias, missing
+  target, malformed value) are skipped and named in the notes.
 
 The panel reports a structured summary — `Created` and `Deleted` (the
 stale-ID-fallback case) list the affected token names underneath;
@@ -198,6 +200,90 @@ Figma's own `com.figma.*` extensions:
 
 Nesting follows the variable's Figma name, split on `/` (`content/surface/primary`).
 
+### Alias + opacity (`com.figma.aliasWithOpacity`)
+
+Figma lets a color variable alias another color variable *and* carry an
+opacity. DTCG has no form for that, so the token keeps its flat, fully
+resolved color in `$value` (usable as-is by any DTCG consumer) and
+records the reference in `$extensions["com.figma.aliasWithOpacity"]`.
+It deliberately does **not** also write `com.figma.aliasData`: a
+consumer that only understands plain aliases would otherwise read this
+token as "exactly `white`" and silently drop the opacity.
+
+`opacity.value` is on Figma's own 0–100 scale (48 = 48%); `$value.alpha`
+is 0–1. Literal opacity:
+
+```json
+"literal": {
+  "$type": "color",
+  "$value": { "colorSpace": "srgb", "components": [1, 1, 1], "alpha": 0.48, "hex": "#FFFFFF" },
+  "$extensions": {
+    "com.figma.variableId": "VariableID:1:13",
+    "com.figma.scopes": ["ALL_FILLS"],
+    "com.figma.aliasWithOpacity": {
+      "color": {
+        "targetVariableId": "VariableID:1:5",
+        "targetVariableName": "white",
+        "targetVariableSetId": "VariableCollectionId:1:2",
+        "targetVariableSetName": "color"
+      },
+      "opacity": { "value": 48 }
+    }
+  }
+}
+```
+
+Opacity that aliases a number variable — `opacity` gains the same four
+`target*` fields as `color`, and `value` is that variable's resolved
+number in this mode:
+
+```json
+"com.figma.aliasWithOpacity": {
+  "color": { "targetVariableId": "VariableID:1:5", "targetVariableName": "white", "targetVariableSetId": "VariableCollectionId:1:2", "targetVariableSetName": "color" },
+  "opacity": {
+    "value": 8,
+    "targetVariableId": "VariableID:1:9",
+    "targetVariableName": "8",
+    "targetVariableSetId": "VariableCollectionId:1:3",
+    "targetVariableSetName": "opacity"
+  }
+}
+```
+
+How `$value.alpha` is computed follows what Figma's own resolver
+(`resolveForConsumer`) returns: if the aliased color is opaque, alpha is
+`opacity / 100`; if the aliased color is itself translucent, Figma
+ignores the opacity and the target's alpha wins. Export adds a note when
+it sees the second case.
+
+A plain alias whose target is an alias + opacity variable keeps the
+ordinary `com.figma.aliasData` (first hop) and gets the flattened
+color-with-alpha in `$value`.
+
+### Stale aliases (`com.figma.staleAlias`)
+
+When an alias target has been deleted, Figma keeps rendering its
+last-known value. Export does the same for `$value`, but never presents
+the deleted variable as a live reference:
+
+- plain alias → no `com.figma.aliasData`; instead
+  `"com.figma.staleAlias": { "targetVariableId": "VariableID:1:8", "targetVariableName": "doomed" }`
+- alias + opacity → the stale reference inside `com.figma.aliasWithOpacity`
+  carries `"stale": true`
+
+Import skips stale tokens (and says which), leaving the Figma variable
+as it is. If a target is gone so completely that no value can be
+recovered, the token is left out of the file with a note — cancel the
+delete prompt on the next Import rather than deleting that variable.
+
+### No `NaN`, ever
+
+Export checks every file for non-finite numbers before writing. If it
+finds one, **nothing is written** and the panel lists where. Import
+likewise skips (with a note naming the token) any malformed value
+instead of writing it into Figma, and doesn't create a new variable it
+can't give a value.
+
 ## Style file format
 
 Styles use `com.figma.styleId` instead of `com.figma.variableId` as the
@@ -236,6 +322,63 @@ rather than force-fitting into a spec type that can't represent it.
 These are deliberate deviations from strict DTCG compliance — a
 generic DTCG consumer won't know what to do with them, but nothing in
 this tool's own Export/Import round-trip loses fidelity over it.
+
+### Styles bound to variables (`com.figma.boundVariables`)
+
+A style has no modes, but the variables bound to its layers do. The raw
+`$value` array only holds Figma's snapshot of those bindings in the
+default mode (a bound color's alpha shows up there as the paint's
+`opacity`), so Paint/Effect/Grid styles with any binding also get
+`$extensions["com.figma.boundVariables"]` — one entry per bound property:
+the layer index, the field (`color`, `radius`, `offsetX`, …, or
+`gradientStops.<i>.color`), the variable's id/name/collection, and its
+resolved value in **every mode of that variable's collection**, keyed by
+mode name. Values use the same shape as a variable token's `$value`.
+
+```json
+"raised": {
+  "$type": "figmaPaint",
+  "$value": [
+    { "type": "SOLID", "visible": true, "opacity": 1, "blendMode": "NORMAL", "color": { "r": 1, "g": 1, "b": 1 },
+      "boundVariables": { "color": { "type": "VARIABLE_ALIAS", "id": "VariableID:1:16" } } },
+    { "type": "SOLID", "visible": true, "opacity": 0.47999998927116394, "blendMode": "NORMAL", "color": { "r": 1, "g": 1, "b": 1 },
+      "boundVariables": { "color": { "type": "VARIABLE_ALIAS", "id": "VariableID:1:13" } } }
+  ],
+  "$extensions": {
+    "com.figma.styleId": "S:8f741ce6…",
+    "com.figma.boundVariables": [
+      {
+        "layer": 0, "field": "color",
+        "variableId": "VariableID:1:16", "variableName": "surface/base",
+        "variableSetId": "VariableCollectionId:1:4", "variableSetName": "theme",
+        "valuesByMode": {
+          "light": { "colorSpace": "srgb", "components": [1, 1, 1], "alpha": 1, "hex": "#FFFFFF" },
+          "dark": { "colorSpace": "srgb", "components": [0.1176, 0.1176, 0.1176], "alpha": 1, "hex": "#1E1E1E" }
+        }
+      },
+      {
+        "layer": 1, "field": "color",
+        "variableId": "VariableID:1:13", "variableName": "overlay/literal",
+        "variableSetId": "VariableCollectionId:1:4", "variableSetName": "theme",
+        "valuesByMode": {
+          "light": { "colorSpace": "srgb", "components": [1, 1, 1], "alpha": 0.48, "hex": "#FFFFFF" },
+          "dark": { "colorSpace": "srgb", "components": [0, 0, 0], "alpha": 0.4, "hex": "#000000" }
+        }
+      }
+    ]
+  }
+}
+```
+
+An effect style's shadow color works the same way (`"field": "color"`
+on the shadow's layer index; a mode where the variable is transparent
+simply shows `"alpha": 0`). A binding to a deleted variable is marked
+`"stale": true`.
+
+`com.figma.boundVariables` is read-only information for consumers:
+Import restores bindings from the `boundVariables` inside `$value`, and
+skips a style's value (with a note) if any of those point at a variable
+that no longer exists.
 
 ## Limitations
 

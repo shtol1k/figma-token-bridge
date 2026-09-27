@@ -635,11 +635,18 @@
           lines.push("- Scope: " + agg.scopeChanges);
           lines.push("- Description: " + agg.descriptionChanges);
           lines.push("- Code Syntax: " + agg.codeSyntaxChanges);
+          if (msg.notes && msg.notes.length > 0) {
+            lines.push(...msg.notes);
+          }
           log("Exported", lines.join("\n"), "success");
           refreshFileStatus();
         } catch (err) {
           log("Export failed", err.message, "error");
         }
+      }
+
+      if (msg.type === "export-error") {
+        log("Export failed — nothing written", "Non-finite values at:\n" + msg.problems.join("\n"), "error");
       }
 
       if (msg.type === "import-check-result") {
