@@ -125,6 +125,24 @@ variable's `name.split("/")` path. Per leaf:
   while `$extensions["com.figma.aliasData"]` records only the
   **immediate** (first-hop) target, matching the shape Figma's own
   native export already uses.
+- **Alias + opacity** (`{color: VARIABLE_ALIAS, opacity: number | VARIABLE_ALIAS}`)
+  is a third value shape the bundled typings don't know about. It's
+  typed locally in `code.ts` (`VariableAliasWithOpacity`, plus an
+  overload of `Variable.setValueForMode`) and resolved by the same
+  recursive walk (`resolveConcrete`), so a plain alias *to* an
+  alias + opacity variable also flattens correctly. Its reference lives
+  in `com.figma.aliasWithOpacity`, never in `com.figma.aliasData` — an
+  older consumer would read the latter as a plain alias and lose the
+  opacity. Before this existed, the shape was formatted as if it were
+  RGBA and exported as `NaN`.
+- Alias targets are checked against the `getLocalVariablesAsync()`
+  enumeration (or `remote`) for the same tombstone reason described
+  under Import below. A deleted target becomes `com.figma.staleAlias`
+  (or `"stale": true` inside `aliasWithOpacity`) with the last-known
+  value, not a live-looking `aliasData`.
+- `postExport()` refuses to write *any* file if the tree contains a
+  non-finite number — `JSON.stringify` would otherwise quietly turn
+  `NaN` into `null`.
 - `$extensions["com.figma.variableId"]` is always written. This is the
   single most load-bearing field in the whole format: it's what makes
   Import survive a rename (see below). Losing it (e.g. a hand-edit that
@@ -258,6 +276,15 @@ these use Figma-specific `$type` values (`figmaPaint`/`figmaEffect`/
 read-only wrapper objects to plain JSON) as `$value`. A generic
 DTCG-consuming tool won't recognize these three `$type`s; this tool's
 own round-trip doesn't need it to.
+
+Variables bound inside those layers (a fill's color, a shadow's color or
+offset) stay in the raw array as Figma's `boundVariables` ids — that's
+what Import writes back. Because a style has no modes but its bound
+variables do, Export also adds `com.figma.boundVariables`: per bound
+property, the variable's name and its resolved value in every mode of
+its collection. It's informational only; Import ignores it and instead
+refuses to write a layer array whose bindings point at a variable that
+no longer exists.
 
 Text style creation needs one extra step Variables never required:
 `figma.loadFontAsync(fontName)` must resolve *before* `fontName` (or any
