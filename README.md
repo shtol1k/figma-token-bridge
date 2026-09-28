@@ -250,10 +250,32 @@ number in this mode:
 }
 ```
 
+The color itself can also be a literal (a hex picked in Figma) while
+only the opacity is an alias. `color` then carries the literal as
+`{ "value": <DTCG color> }` instead of the `target*` fields — so a
+consumer tells the two apart by whether `color.targetVariableId` is
+present:
+
+```json
+"com.figma.aliasWithOpacity": {
+  "color": { "value": { "colorSpace": "srgb", "components": [0.2, 0.4, 0.6], "alpha": 1, "hex": "#336699" } },
+  "opacity": {
+    "value": 8,
+    "targetVariableId": "VariableID:1:9",
+    "targetVariableName": "8",
+    "targetVariableSetId": "VariableCollectionId:1:3",
+    "targetVariableSetName": "opacity"
+  }
+}
+```
+
+(A literal color with a literal opacity is never stored this way — Figma
+keeps that as a plain RGBA value.)
+
 How `$value.alpha` is computed follows what Figma's own resolver
-(`resolveForConsumer`) returns: if the aliased color is opaque, alpha is
-`opacity / 100`; if the aliased color is itself translucent, Figma
-ignores the opacity and the target's alpha wins. Export adds a note when
+(`resolveForConsumer`) returns: if the color is opaque, alpha is
+`opacity / 100`; if the color is itself translucent, Figma ignores the
+opacity and the color's own alpha wins. Export adds a note when
 it sees the second case.
 
 A plain alias whose target is an alias + opacity variable keeps the
