@@ -20,31 +20,40 @@ interface AliasInfo {
 }
 
 /**
- * A COLOR variable value that aliases another color variable *and* carries
- * an opacity — Figma's "alias + opacity". Not in @figma/plugin-typings
- * (1.134), so it's typed here. `opacity` is on Figma's 0–100 scale (48 means
- * 48%), either a literal or an alias to a FLOAT variable. Observed resolution
- * (via `resolveForConsumer`): when the aliased color is opaque, the resolved
- * alpha is `opacity / 100`; when the aliased color is itself translucent, the
- * opacity is ignored and the target's own alpha wins.
+ * A COLOR variable value that carries a separate opacity, with at least one
+ * of the two being an alias — Figma's "alias + opacity". Not in
+ * @figma/plugin-typings (1.134), so it's typed here. Figma's own validator
+ * accepts exactly two forms (a literal color with a literal opacity is just
+ * RGBA):
+ *
+ * - `color` aliases a color variable; `opacity` is a literal or an alias;
+ * - `color` is a literal (a hex picked in the UI); `opacity` is an alias.
+ *
+ * `opacity` is on Figma's 0–100 scale (48 means 48%); an opacity alias points
+ * at a FLOAT variable. Observed resolution (via `resolveForConsumer`): when
+ * the color is opaque, the resolved alpha is `opacity / 100`; when the color
+ * is itself translucent, the opacity is ignored and the color's alpha wins.
  */
-interface VariableAliasWithOpacity {
-  color: VariableAlias;
-  opacity: number | VariableAlias;
-}
+type ColorWithOpacity =
+  | { color: VariableAlias; opacity: number | VariableAlias }
+  | { color: RGB | RGBA; opacity: VariableAlias };
 
 /** What `variable.valuesByMode[modeId]` can actually hold at runtime. */
-type RawVariableValue = VariableValue | VariableAliasWithOpacity;
+type RawVariableValue = VariableValue | ColorWithOpacity;
 
 // The bundled typings only accept VariableValue; the API itself accepts the
-// alias+opacity shape too (verified with setValueForMode on a live file).
+// color+opacity shapes too (verified with setValueForMode on a live file).
 interface Variable {
-  setValueForMode(modeId: string, newValue: VariableAliasWithOpacity): void;
+  setValueForMode(modeId: string, newValue: ColorWithOpacity): void;
 }
 
-/** `com.figma.aliasWithOpacity` — see README "Alias + opacity". */
+/**
+ * `com.figma.aliasWithOpacity` — see README "Alias + opacity". `color` is
+ * either a reference (the four `target*` fields) or, for a literal color,
+ * `{ value: <DTCG color> }`.
+ */
 interface AliasWithOpacityInfo {
-  color: AliasInfo & { stale?: true };
+  color: (AliasInfo & { stale?: true }) | { value: unknown };
   opacity: { value: number } & Partial<AliasInfo> & { stale?: true };
 }
 
@@ -97,10 +106,15 @@ function isAlias(value: unknown): value is VariableAlias {
   return typeof value === "object" && value !== null && (value as VariableAlias).type === "VARIABLE_ALIAS";
 }
 
-function isAliasWithOpacity(value: unknown): value is VariableAliasWithOpacity {
-  if (typeof value !== "object" || value === null) return false;
-  const v = value as VariableAliasWithOpacity;
-  return isAlias(v.color) && (typeof v.opacity === "number" || isAlias(v.opacity));
+function isColorLiteral(value: unknown): value is RGB | RGBA {
+  return typeof value === "object" && value !== null && "r" in value && "g" in value && "b" in value;
+}
+
+function isColorWithOpacity(value: unknown): value is ColorWithOpacity {
+  if (typeof value !== "object" || value === null || !("color" in value) || !("opacity" in value)) return false;
+  const v = value as ColorWithOpacity;
+  if (isAlias(v.color)) return typeof v.opacity === "number" || isAlias(v.opacity);
+  return isColorLiteral(v.color) && isAlias(v.opacity);
 }
 
 function rawValue(variable: Variable, modeId: string): RawVariableValue | undefined {
@@ -108,7 +122,7 @@ function rawValue(variable: Variable, modeId: string): RawVariableValue | undefi
 }
 
 function setRawValueForMode(variable: Variable, modeId: string, value: RawVariableValue): void {
-  if (isAliasWithOpacity(value)) {
+  if (isColorWithOpacity(value)) {
     variable.setValueForMode(modeId, value);
   } else {
     variable.setValueForMode(modeId, value);
@@ -175,7 +189,7 @@ function modeFor(variable: Variable, modeId: string): string {
   return variable.valuesByMode[modeId] !== undefined ? modeId : Object.keys(variable.valuesByMode)[0];
 }
 
-/** Figma's observed rule — see VariableAliasWithOpacity. */
+/** Figma's observed rule — see ColorWithOpacity. */
 function applyAliasOpacity(color: RGB | RGBA, opacity: number): RGBA {
   const targetAlpha = "a" in color ? color.a : 1;
   return { r: color.r, g: color.g, b: color.b, a: targetAlpha < 1 ? targetAlpha : opacity / 100 };
@@ -199,9 +213,9 @@ async function resolveConcrete(
   const raw = rawValue(variable, modeId);
   if (raw === undefined) return null;
 
-  if (isAliasWithOpacity(raw)) {
-    const color = await resolveAliasTarget(raw.color, modeId, chain);
-    if (color === null || typeof color !== "object" || !("r" in color)) return null;
+  if (isColorWithOpacity(raw)) {
+    const color = isAlias(raw.color) ? await resolveAliasTarget(raw.color, modeId, chain) : raw.color;
+    if (!isColorLiteral(color)) return null;
     const opacity = typeof raw.opacity === "number" ? raw.opacity : await resolveAliasTarget(raw.opacity, modeId, chain);
     if (typeof opacity !== "number") return null;
     return applyAliasOpacity(color, opacity);
@@ -240,14 +254,19 @@ async function serializeVariableValue(
 
   const extensions: Record<string, unknown> = {};
 
-  if (isAliasWithOpacity(raw)) {
-    const color = await lookupVariable(raw.color.id, ctx);
-    // resolveConcrete succeeded, so both targets exist (possibly as tombstones).
-    const info: AliasWithOpacityInfo = {
-      color: await aliasInfo(color.variable!),
-      opacity: { value: 0 },
-    };
-    if (color.stale) info.color.stale = true;
+  if (isColorWithOpacity(raw)) {
+    // resolveConcrete succeeded, so every alias target exists (possibly as a tombstone).
+    let colorStale = false;
+    let colorValue: RGB | RGBA = raw.color as RGB | RGBA;
+    const info: AliasWithOpacityInfo = { color: { value: null }, opacity: { value: 0 } };
+    if (isAlias(raw.color)) {
+      const color = await lookupVariable(raw.color.id, ctx);
+      colorStale = color.stale;
+      colorValue = (await resolveConcrete(color.variable!, modeFor(color.variable!, modeId))) as RGB | RGBA;
+      info.color = { ...(await aliasInfo(color.variable!)), ...(colorStale ? { stale: true as const } : {}) };
+    } else {
+      info.color = { value: formatValue("COLOR", { a: 1, ...raw.color }).value };
+    }
 
     if (typeof raw.opacity === "number") {
       info.opacity = { value: raw.opacity };
@@ -259,13 +278,12 @@ async function serializeVariableValue(
     }
     extensions["com.figma.aliasWithOpacity"] = info;
 
-    const targetColor = await resolveConcrete(color.variable!, modeFor(color.variable!, modeId));
-    if (targetColor && typeof targetColor === "object" && "a" in targetColor && targetColor.a < 1) {
+    if ("a" in colorValue && colorValue.a < 1) {
       ctx.notes.push(
-        `"${v.name}": aliases translucent "${color.variable!.name}" — Figma ignores the opacity (${info.opacity.value}) in that case; exported alpha is the target's.`,
+        `"${v.name}": color is translucent — Figma ignores the opacity (${info.opacity.value}) in that case; exported alpha is the color's.`,
       );
     }
-    if (info.color.stale || info.opacity.stale) {
+    if (colorStale || info.opacity.stale) {
       ctx.notes.push(`"${v.name}": alias + opacity points at a deleted variable — exported its last-known value, flagged stale.`);
     }
   } else if (isAlias(raw)) {
@@ -370,8 +388,8 @@ interface ImportSummary {
 }
 
 function valuesEqual(a: RawVariableValue, b: RawVariableValue): boolean {
-  const withOpacityA = isAliasWithOpacity(a);
-  const withOpacityB = isAliasWithOpacity(b);
+  const withOpacityA = isColorWithOpacity(a);
+  const withOpacityB = isColorWithOpacity(b);
   if (withOpacityA || withOpacityB) {
     if (!withOpacityA || !withOpacityB) return false;
     const oa = a.opacity;
@@ -380,7 +398,10 @@ function valuesEqual(a: RawVariableValue, b: RawVariableValue): boolean {
       typeof oa === "number" && typeof ob === "number"
         ? Math.abs(oa - ob) < 1e-4
         : isAlias(oa) && isAlias(ob) && oa.id === ob.id;
-    return a.color.id === b.color.id && opacityEqual;
+    const ca = a.color;
+    const cb = b.color;
+    const colorEqual = isAlias(ca) || isAlias(cb) ? valuesEqual(ca, cb) : valuesEqual({ a: 1, ...ca }, { a: 1, ...cb });
+    return colorEqual && opacityEqual;
   }
   const aliasA = isAlias(a);
   const aliasB = isAlias(b);
@@ -533,10 +554,21 @@ async function importFile(
         summary.notes.push(`"${name}": skipped — alias + opacity was exported with a deleted target; Figma left as is.`);
         return null;
       }
-      const colorTarget = await findLiveTarget(ref, "COLOR");
-      if (!colorTarget) {
-        summary.notes.push(`"${name}": skipped — alias + opacity color target "${ref.targetVariableName}" not found.`);
-        return null;
+      let color: VariableAlias | RGBA;
+      if (ref.targetVariableId || ref.targetVariableName) {
+        const colorTarget = await findLiveTarget(ref, "COLOR");
+        if (!colorTarget) {
+          summary.notes.push(`"${name}": skipped — alias + opacity color target "${ref.targetVariableName}" not found.`);
+          return null;
+        }
+        color = { type: "VARIABLE_ALIAS", id: colorTarget.id };
+      } else {
+        const literal = toFigmaValue("color", ref.value);
+        if (literal === null) {
+          summary.notes.push(`"${name}": skipped — alias + opacity has malformed color ${JSON.stringify(ref.value)}.`);
+          return null;
+        }
+        color = literal as RGBA;
       }
       let opacity: number | VariableAlias;
       if (op.targetVariableId || op.targetVariableName) {
@@ -552,7 +584,11 @@ async function importFile(
         summary.notes.push(`"${name}": skipped — alias + opacity has invalid opacity ${JSON.stringify(op.value)} (want 0–100).`);
         return null;
       }
-      return { color: { type: "VARIABLE_ALIAS", id: colorTarget.id }, opacity };
+      if (isAlias(color)) return { color, opacity };
+      if (isAlias(opacity)) return { color, opacity };
+      // Figma rejects a literal color with a literal opacity (that's just RGBA).
+      summary.notes.push(`"${name}": skipped — alias + opacity with neither color nor opacity aliased isn't a shape Figma accepts.`);
+      return null;
     }
 
     const aliasData = extensions["com.figma.aliasData"];

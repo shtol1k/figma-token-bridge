@@ -125,9 +125,11 @@ variable's `name.split("/")` path. Per leaf:
   while `$extensions["com.figma.aliasData"]` records only the
   **immediate** (first-hop) target, matching the shape Figma's own
   native export already uses.
-- **Alias + opacity** (`{color: VARIABLE_ALIAS, opacity: number | VARIABLE_ALIAS}`)
-  is a third value shape the bundled typings don't know about. It's
-  typed locally in `code.ts` (`VariableAliasWithOpacity`, plus an
+- **Alias + opacity** is a third value shape the bundled typings don't
+  know about, in two forms — `{color: VARIABLE_ALIAS, opacity: number | VARIABLE_ALIAS}`
+  and `{color: RGBA, opacity: VARIABLE_ALIAS}` (a hex color with only the
+  opacity aliased; Figma's validator rejects a literal color with a
+  literal opacity). It's typed locally in `code.ts` (`ColorWithOpacity`, plus an
   overload of `Variable.setValueForMode`) and resolved by the same
   recursive walk (`resolveConcrete`), so a plain alias *to* an
   alias + opacity variable also flattens correctly. Its reference lives
